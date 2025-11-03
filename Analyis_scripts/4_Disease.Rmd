@@ -1,0 +1,1234 @@
+Disease association analysis
+
+
+# 1. LDSC (pseudobulk)
+```{r}
+library(ArchR)
+addArchRGenome("hg38")
+
+library(GenomicRanges)
+library(rtracklayer)
+library(ggplot2)
+library(stringi)
+```
+
+Prepare LDSC folders
+  LDSC code and data
+   - baselineLD_v2.2 (110 items)
+   - ldsc-master
+   - list.txt
+   - plink_files (88 items)
+   - w_hm3.snplist
+   - weights (88 items)
+  My data
+   = create "./data_input/data_LDSC/bed", copy bed files to this directory
+   = create "./data_input/data_LDSC/GWAS", copy GWAS sumstats (see below)
+   = create "./data_input/data_LDSC/annot", empty
+   = create "./data_input/data_LDSC/out", empty
+   
+## (1) prepare BED
+```{r}
+# get cell type specific peaks
+ctMarkerPeaks_7ct <- getMarkerFeatures(ArchR_EHB, useMatrix = "PeakMatrix", groupBy = "ctAnnot_2.0", 
+                                            bias = c("TSSEnrichment", "log10(nFrags)"), testMethod = "wilcoxon", k = 100, maxCells = 1000)
+save(ctMarkerPeaks_7ct, file="./data_rda/Script4/ctMarkerPeaks_7ct.rda")
+
+ctPeaks <- getMarkers(ctMarkerPeaks_7ct, cutOff = "FDR <= 0.01 & Log2FC >= 0.6")
+names(ctPeaks) <- stri_replace_all_regex(names(ctPeaks), pattern = c("Neuronal IPC","Radial glia"), 
+                                         replacement = c("NIPC", "RG"), vectorize_all = FALSE)
+for (x in names(ctPeaks)){
+  name <- paste0("./data_input/LDSC_input/bed/",x,".bed")
+  write.table(ctPeaks@listData[[x]][,c("seqnames","start","end")], name, 
+              row.names = FALSE, col.names = FALSE, sep = '\t', quote = FALSE)
+  rm(x, name)
+}
+```
+
+
+## (2) munge sumstats
+```{bash}
+conda activate ldsc
+cd $HOME/Downloads/project_EHB/data_input/LDSC
+export data=$HOME/Downloads/project_EHB/data_input/LDSC_input
+
+# neurodevelopmental disorders
+python ldsc-master/munge_sumstats.py --sumstats ${data}/GWAS/sumstats_raw/ADHD_meta_Jan2022_iPSYCH1_iPSYCH2_deCODE_PGC.meta --merge-alleles w_hm3.snplist  --out ${data}/GWAS/sumstats/GWAS_ADHD --N-cas 38691 --N-con 186843 --a1-inc
+python ldsc-master/munge_sumstats.py --sumstats ${data}/GWAS/sumstats_raw/iPSYCH-PGC_ASD_Nov2017.txt --merge-alleles w_hm3.snplist  --out ${data}/GWAS/sumstats/GWAS_ASD --N-cas 18382 --N-con 27969 --a1-inc
+python ldsc-master/munge_sumstats.py --sumstats ${data}/GWAS/sumstats_raw/GCST90043708_buildGRCh37.tsv --merge-alleles w_hm3.snplist  --out ${data}/GWAS/sumstats/GWAS_BP --a1-inc
+python ldsc-master/munge_sumstats.py --sumstats ${data}/GWAS/sumstats_raw/daner_OCD_full_wo23andMe_190522.txt --merge-alleles w_hm3.snplist  --out ${data}/GWAS/sumstats/GWAS_OCD --N-cas 23493 --N-con 1114613 --a1-inc
+python ldsc-master/munge_sumstats.py --sumstats ${data}/GWAS/sumstats_raw/PGC3_SCZ_wave3.european.autosome.public.v3.vcf.tsv --merge-alleles w_hm3.snplist  --out ${data}/GWAS/sumstats/GWAS_SCZ --N-cas 52017 --N-con 75889 --a1-inc
+
+# neurodegenerative disorders
+python ldsc-master/munge_sumstats.py --sumstats ${data}/GWAS/sumstats_raw/GCST90027158_buildGRCh38.tsv --merge-alleles w_hm3.snplist  --out ${data}/GWAS/sumstats/GWAS_AD --a1-inc
+python ldsc-master/munge_sumstats.py --sumstats ${data}/GWAS/sumstats_raw/GCST90275127.tsv --merge-alleles w_hm3.snplist  --out ${data}/GWAS/sumstats/GWAS_PD --N-cas 42792 --N-con 568693 --a1-inc
+
+# other psychiatric conditions
+python ldsc-master/munge_sumstats.py --sumstats ${data}/GWAS/sumstats_raw/pgc-mdd2025_no23andMe_eur_v3-49-24-11.tsv --merge-alleles w_hm3.snplist  --out ${data}/GWAS/sumstats/GWAS_MDD --N-cas 412305 --N-con 1588397 --a1-inc
+python ldsc-master/munge_sumstats.py --sumstats ${data}/GWAS/sumstats_raw/anxiety.meta.full.cc.tbl.tsv --merge-alleles w_hm3.snplist  --out ${data}/GWAS/sumstats/GWAS_ANX --a1-inc
+python ldsc-master/munge_sumstats.py --sumstats ${data}/GWAS/sumstats_raw/g4_GWAS_Sumstats_Cleaned.txt --merge-alleles w_hm3.snplist  --out ${data}/GWAS/sumstats/GWAS_cogG4 --a1-inc
+python ldsc-master/munge_sumstats.py --sumstats ${data}/GWAS/sumstats_raw/g6_GWAS_Sumstats_Cleaned.txt --merge-alleles w_hm3.snplist  --out ${data}/GWAS/sumstats/GWAS_cogG6 --a1-inc
+```
+
+
+## (3) make .annot files
+```{bash}
+conda activate ldsc
+cd $HOME/Downloads/project_EHB/data_input/LDSC
+celltypes=("Erythroblast" "Fibroblast" "Glioblast" "Neuroblast" "Neuron" "nIPC" "RG")
+export data=$HOME/Downloads/project_EHB/data_input/LDSC_input
+
+# automated parallel loop ~ 1.5 min
+parallel -j 7 --bar '
+  cell={1}
+  for bimFile in plink_files/*.bim; do
+    chr=$(echo "$bimFile" | cut -d "." -f 4)
+    python ldsc-master/make_annot.py \
+      --bed-file "${data}/bed/${cell}.bed" \
+      --bimfile "$bimFile" \
+      --annot-file "${data}/annot/${cell}.${chr}.annot"
+  done
+' ::: "${celltypes[@]}"
+```
+
+
+## (4) first-level LD score
+Tutorial: https://github.com/bulik/ldsc/wiki/LD-Score-Estimation-Tutorial
+          "Partitioned LD Scores >> Step 2"
+This step summarizes *LD structure* in my data, and is *independent* of the GWAS result
+The output MUST be stored in the same folder as the annot files!!
+```{bash}
+# automated parallel loop ~ 70 min
+ls ${data}/annot/*.annot | parallel -j 8 --bar '
+  annotFile={}
+  chr=$(basename "$annotFile" | cut -d "." -f 2)
+  celltype=$(basename "$annotFile" | cut -d "." -f 1)
+  
+  python ldsc-master/ldsc.py \
+    --l2 --bfile plink_files/1000G.EUR.hg38.${chr} \
+    --ld-wind-cm 1 \
+    --annot "$annotFile" \
+    --thin-annot \
+    --out "${data}/annot/${celltype}.${chr}" \
+    --print-snps list.txt
+'
+```
+
+
+## (5) group-level LD score
+Tutorial: https://github.com/bulik/ldsc/wiki/Partitioned-Heritability#cell-type-group-analysis
+          "Cell-type group analysis"
+```{bash}
+# automated parallel loop for running LD baseline model ~ 70 min
+ls ${data}/GWAS/sumstats/*.sumstats.gz | parallel -j 3 --bar '
+  sumstats={}
+  study=$(basename $sumstats | cut -d '/' -f 9 | cut -d '_' -f 2 | cut -d '.' -f 1)
+  mkdir ${data}/out/${study}
+  
+  for sample in $(ls ${data}/annot | cut -d '.' -f 1 | uniq); do
+    python ldsc-master/ldsc.py \
+      --h2 $sumstats \
+      --ref-ld-chr ${data}/annot/${sample}.,baselineLD_v2.2/baselineLD. \
+      --w-ld-chr weights/weights.hm3_noMHC. \
+      --frqfile-chr plink_files/1000G.EUR.hg38. \
+      --out ${data}/out/${study}/${sample} \
+      --print-coefficients \
+      --overlap-annot
+  done
+'
+```
+
+
+
+# 2. LDSC results
+## (1) Import
+```{r}
+LDSC_results <- list()
+for (folder in list.files("./data_input/LDSC_input/out", full.names = TRUE)){
+  for (file in list.files(folder, pattern="\\.results$", full.names = TRUE)){
+    disease <- sub("./data_input/LDSC_input/out/","",folder)
+    table <- read.table(file, row.names=1)
+    LDSC_results[[disease]] <- rbind(LDSC_results[[disease]], table[2,])
+  }
+  LDSC_results[[disease]][] <- lapply(LDSC_results[[disease]], as.numeric)
+  names(LDSC_results[[disease]]) <- c("Prop._SNPs", "Prop._h2", "Prop._h2_std_error", "Enrichment", "Enrichment_std_error", "Enrichment_p", "Coefficient", "Coefficient_std_error", "Coefficient_z.score")
+  LDSC_results[[disease]]$GWAS <- disease
+  LDSC_results[[disease]]$Test_group <- sub(".results","",list.files(folder, pattern = "\\.results$"))
+  LDSC_results[[disease]]$Enrichment_sig <- ifelse(LDSC_results[[disease]]$Enrichment_p <= 0.001, "***",
+                                                  ifelse(LDSC_results[[disease]]$Enrichment_p <= 0.01, "**",
+                                                         ifelse(LDSC_results[[disease]]$Enrichment_p <= 0.05, "*", "")))
+  LDSC_results[[disease]]$Coefficient_p <- 2 * pnorm(-abs(LDSC_results[[disease]]$Coefficient_z.score))
+  LDSC_results[[disease]]$Coefficient_sig <- ifelse(LDSC_results[[disease]]$Coefficient_p <= 0.001, "***",
+                                                  ifelse(LDSC_results[[disease]]$Coefficient_p <= 0.01, "**",
+                                                        ifelse(LDSC_results[[disease]]$Coefficient_p <= 0.05, "*", "")))
+  rm(folder, file, table, disease)
+}
+
+# formatting
+LDSC_results <- do.call(rbind, LDSC_results)
+row.names(LDSC_results) <- NULL
+LDSC_results$Test_group <- stri_replace_all_regex(LDSC_results$Test_group, vectorize=FALSE, 
+                                                  pattern=c('nIPC', 'RG'), replacement=c('Neuronal IPC', 'Radial glia'))
+LDSC_results$Test_group <- sub("Erythrocyte","Erythroblast",LDSC_results$Test_group)
+LDSC_results$Test_group <- factor(LDSC_results$Test_group, 
+                                  levels = c("Erythroblast", "Fibroblast", "Glioblast", "Radial glia","Neuronal IPC","Neuroblast","Neuron"))
+
+# remove n-IPC: few peaks, skewed result!
+LDSC_results <- LDSC_results[LDSC_results$Test_group != "Neuronal IPC",]
+
+# multiple testing correction
+LDSC_results$Enrichment_p_adj <- p.adjust(LDSC_results$Enrichment_p, method = "BH")
+LDSC_results$Enrichment_p_adj_sig <- ifelse(LDSC_results$Enrichment_p_adj <= 0.001, "***",
+                                                  ifelse(LDSC_results$Enrichment_p_adj <= 0.01, "**",
+                                                        ifelse(LDSC_results$Enrichment_p_adj <= 0.05, "*", "")))
+```
+
+
+## (2) plot: enrichment score
+```{r}
+p <- list()
+for (x in unique(LDSC_results$GWAS)){
+  p[[x]] <- ggplot(LDSC_results[LDSC_results$GWAS==x,], aes(x=Test_group, y=Enrichment, fill=Test_group)) + 
+    geom_col(color="black", position=position_dodge(),width=0.7) +
+    scale_fill_manual(values=c(Erythroblast="#f75c63", Fibroblast="#d1a279", Neuron="#3ee2ff", Neuroblast="#00cfff",
+                                 "Neuronal IPC" = "#40a1ff", 'Radial glia'="#836dff", Glioblast="#c47df0")) +
+    geom_text(aes(label=Enrichment_p_adj_sig), position=position_dodge(width=0.9), vjust=0,size=5) +  
+    theme_bw() + ggtitle(x) + scale_y_continuous(expand = expansion(mult = c(0.1, 0.15))) + 
+    theme(axis.title.x = element_blank(), axis.text.x = element_blank(), axis.ticks = element_blank(), 
+          axis.title.y = element_blank(), legend.position = "none")
+}
+
+for (x in 1:length(p)){
+  p[[x]] <- p[[x]] + theme(, )
+  for (x in c(2:6,8:11)){
+    p[[x]] <- p[[x]] + theme(axis.title.y = element_blank())
+  }
+}
+
+png("./ArchR_EHB/Plots/Script4/grid_LDSC_p_adj.png", width = 3000, height = 1100, res = 250)
+gridExtra::grid.arrange(grobs = p, ncol = 6, left = textGrob("Enrichment (prop. h2 / prop. SNPs)", 
+                                                             rot = 90, gp = gpar(fontsize = 12)))
+dev.off()
+
+rm(x, p)
+```
+
+## (3) save LDSC
+```{r}
+save(LDSC_results, file="./data_rda/Script4/LDSC_result.rda")
+```
+
+
+
+# 3. SCAVENGE (single cell)
+Tutorial: 
+  https://sankaranlab.github.io/SCAVENGE/articles/SCAVENGE.html#trait-relevant-cell-determination-from-permutation-test
+  https://github.com/sankaranlab/SCAVENGE/wiki/%5BSCAVENGE%5D-Fine-mapping-analysis-of-GWAS-variants-prior-to-SCAVENGE-analysis
+  https://github.com/sankaranlab/SCAVENGE/wiki/%5BSCAVENGE%5D-Preparing-your-scATAC-seq-data
+```{r}
+library(SCAVENGE)
+library(chromVAR)
+library(gchromVAR)
+library(BuenColors)
+library(SummarizedExperiment)
+library(data.table)
+library(dplyr)
+library(BiocParallel)
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(igraph)
+library(stringi)
+library(pbmcapply)
+library(patchwork)
+
+library(ArchR)
+addArchRGenome("hg38")  # MUST RUN THIS IN EVERY NEW R SESSION!
+```
+
+
+## (1) GWAS fine-mapping
+Tutorial: https://github.com/sankaranlab/SCAVENGE/wiki/%5BSCAVENGE%5D-Fine-mapping-analysis-of-GWAS-variants-prior-to-SCAVENGE-analysis
+### [1] prepare sumstats
+```{r}
+# import raw GWAS sumstats ~ 1.3 min
+sumstatsList <- list()
+for (x in list.files("./data_input/LDSC_input/GWAS/sumstats_raw")){
+  print(x)
+  sumstatsList[[x]] <- fread(paste0("./data_input/LDSC_input/GWAS/sumstats_raw/",x))
+  rm(x)
+}
+
+# GWAS study names
+GWAS_studies <- read.delim("./data_input/LDSC_input/GWAS/GWAS_studies.txt")
+names(sumstatsList) <- stri_replace_all_regex(names(sumstatsList), pattern = GWAS_studies$File, 
+                                              replacement = GWAS_studies$Condition, vectorize_all = FALSE)
+```
+
+```{r}
+## neurodevelopmental disorders
+
+# ADHD
+sumstatsList[["ADHD"]]$N <- sumstatsList[["ADHD"]]$Nca + sumstatsList[["ADHD"]]$Nco
+sumstatsList[["ADHD"]]$FREQ <- (sumstatsList[["ADHD"]]$FRQ_A_38691 * sumstatsList[["ADHD"]]$Nca + 
+                                  sumstatsList[["ADHD"]]$FRQ_U_186843 * sumstatsList[["ADHD"]]$Nco) / sumstatsList[["ADHD"]]$N
+sumstatsList[["ADHD"]]$BETA <- log(sumstatsList[["ADHD"]]$OR)
+c("SNP","A1","A2","FREQ","BETA","SE","P","N") %in% names(sumstatsList[["ADHD"]])
+sumstatsList[["ADHD"]] <- sumstatsList[["ADHD"]][, c("SNP","A1","A2","FREQ","BETA","SE","P","N")]
+
+# ANX
+names(sumstatsList[["ANX"]]) <- stri_replace_all_regex(names(sumstatsList[["ANX"]]),
+                                                       pattern = c("Allele1","Allele2","Freq1","Effect","StdErr","P.value"),
+                                                       replacement = c("A1","A2","FREQ","BETA","SE","P"), vectorize_all = FALSE)
+c("SNP","A1","A2","FREQ","BETA","SE","P","N") %in% names(sumstatsList[["ANX"]])
+sumstatsList[["ANX"]] <- sumstatsList[["ANX"]][, c("SNP","A1","A2","FREQ","BETA","SE","P","N")]
+
+# OCD
+sumstatsList[["OCD"]]$N <- sumstatsList[["OCD"]]$Nca + sumstatsList[["OCD"]]$Nco
+sumstatsList[["OCD"]]$FREQ <- (sumstatsList[["OCD"]]$FRQ_A_23493 * sumstatsList[["OCD"]]$Nca + 
+                                  sumstatsList[["OCD"]]$FRQ_U_1114613 * sumstatsList[["OCD"]]$Nco) / sumstatsList[["OCD"]]$N
+sumstatsList[["OCD"]]$BETA <- log(sumstatsList[["OCD"]]$OR)
+c("SNP","A1","A2","FREQ","BETA","SE","P","N") %in% names(sumstatsList[["OCD"]])
+sumstatsList[["OCD"]] <- sumstatsList[["OCD"]][, c("SNP","A1","A2","FREQ","BETA","SE","P","N")]
+
+# cogG4
+c("SNP","A1","A2","FREQ","BETA","SE","P","N") %in% names(sumstatsList[["cogG4"]])
+sumstatsList[["cogG4"]] <- sumstatsList[["cogG4"]][, c("SNP","A1","A2","FREQ","BETA","SE","P","N")]
+
+# cogG6
+c("SNP","A1","A2","FREQ","BETA","SE","P","N") %in% names(sumstatsList[["cogG6"]])
+sumstatsList[["cogG6"]] <- sumstatsList[["cogG6"]][, c("SNP","A1","A2","FREQ","BETA","SE","P","N")]
+```
+
+```{r}
+## other conditions
+
+# AD
+sumstatsList[["AD"]]$N <- sumstatsList[["AD"]]$n_cases + sumstatsList[["AD"]]$n_controls
+names(sumstatsList[["AD"]]) <- stri_replace_all_regex(names(sumstatsList[["AD"]]),
+    pattern = c("other_allele","effect_allele_frequency","beta","standard_error","p_value"),
+    replacement = c("A2","FREQ","BETA","SE","P"), vectorize_all = FALSE)
+names(sumstatsList[["AD"]]) <- sub("effect_allele","A1", names(sumstatsList[["AD"]]))
+c("SNP","A1","A2","FREQ","BETA","SE","P","N") %in% names(sumstatsList[["AD"]])
+sumstatsList[["AD"]] <- sumstatsList[["AD"]][, c("SNP","A1","A2","FREQ","BETA","SE","P","N")]
+
+# BP
+names(sumstatsList[["BP"]]) <- stri_replace_all_regex(names(sumstatsList[["BP"]]),
+    pattern = c("other_allele","effect_allele_frequency","beta","standard_error","p_value"),
+    replacement = c("A2","FREQ","BETA","SE","P"), vectorize_all = FALSE)
+names(sumstatsList[["BP"]]) <- sub("effect_allele","A1", names(sumstatsList[["BP"]]))
+c("SNP","A1","A2","FREQ","BETA","SE","P","N") %in% names(sumstatsList[["BP"]])
+sumstatsList[["BP"]] <- sumstatsList[["BP"]][, c("SNP","A1","A2","FREQ","BETA","SE","P","N")]
+
+# PD
+sumstatsList[["PD"]]$N <- 42792 + 568693
+names(sumstatsList[["PD"]]) <- stri_replace_all_regex(names(sumstatsList[["PD"]]),
+    pattern = c("other_allele","effect_allele_frequency","beta","standard_error","p_value"),
+    replacement = c("A2","FREQ","BETA","SE","P"), vectorize_all = FALSE)
+names(sumstatsList[["PD"]]) <- sub("effect_allele","A1", names(sumstatsList[["PD"]]))
+c("SNP","A1","A2","FREQ","BETA","SE","P","N") %in% names(sumstatsList[["PD"]])
+sumstatsList[["PD"]] <- sumstatsList[["PD"]][, c("SNP","A1","A2","FREQ","BETA","SE","P","N")]
+
+# MDD
+sumstatsList[["MDD"]]$N <- sumstatsList[["MDD"]]$NCAS + sumstatsList[["MDD"]]$NCON
+sumstatsList[["MDD"]]$FREQ <- (sumstatsList[["MDD"]]$FCAS * sumstatsList[["MDD"]]$NCAS + 
+                                  sumstatsList[["MDD"]]$FCON * sumstatsList[["MDD"]]$NCON) / sumstatsList[["MDD"]]$N
+names(sumstatsList[["MDD"]]) <- stri_replace_all_regex(names(sumstatsList[["MDD"]]),
+                                                       pattern = c("NEA","Freq1","PVAL"),
+                                                       replacement = c("A2","FREQ","P"), vectorize_all = FALSE)
+names(sumstatsList[["MDD"]]) <- sub("EA", "A1", names(sumstatsList[["MDD"]]))
+c("SNP","A1","A2","FREQ","BETA","SE","P","N") %in% names(sumstatsList[["MDD"]])
+sumstatsList[["MDD"]] <- sumstatsList[["MDD"]][, c("SNP","A1","A2","FREQ","BETA","SE","P","N")]
+
+# SCZ
+sumstatsList[["SCZ"]]$N <- sumstatsList[["SCZ"]]$NCAS + sumstatsList[["SCZ"]]$NCON
+sumstatsList[["SCZ"]]$FREQ <- (sumstatsList[["SCZ"]]$FCAS * sumstatsList[["SCZ"]]$NCAS + 
+                                  sumstatsList[["SCZ"]]$FCON * sumstatsList[["SCZ"]]$NCON) / sumstatsList[["SCZ"]]$N
+names(sumstatsList[["SCZ"]]) <- sub("PVAL","P",names(sumstatsList[["SCZ"]]))
+c("SNP","A1","A2","FREQ","BETA","SE","P","N") %in% names(sumstatsList[["SCZ"]])
+sumstatsList[["SCZ"]] <- sumstatsList[["SCZ"]][, c("SNP","A1","A2","FREQ","BETA","SE","P","N")]
+```
+
+```{r}
+## ASD
+# ASD doesn't include "allele frequency" or "N" for each SNP for data privacy...
+
+# FREQ >> use frequency from European reference genome (PLINK files) as estimates
+SNP_frq <- data.frame()
+for (x in list.files("./data_input/LDSC/plink_files", full.names = TRUE, pattern = "\\.frq$")){
+  frq <- as.data.frame(fread(x))
+  SNP_frq <- rbind(SNP_frq, frq)
+  rm(x, frq)
+}
+row.names(SNP_frq) <- SNP_frq$SNP
+sumstatsList[["ASD"]] <- sumstatsList[["ASD"]][sumstatsList[["ASD"]]$SNP %in% SNP_frq$SNP,]
+SNP_frq <- SNP_frq[sumstatsList[["ASD"]]$SNP,]
+sumstatsList[["ASD"]]$FREQ <- SNP_frq$MAF
+rm(SNP_frq)
+
+# N, BETA
+sumstatsList[["ASD"]]$N <- 18382 + 27969
+sumstatsList[["ASD"]]$BETA <- log(sumstatsList[["ASD"]]$OR)
+
+# filter
+c("SNP","A1","A2","FREQ","BETA","SE","P","N") %in% names(sumstatsList[["ASD"]])
+sumstatsList[["ASD"]] <- sumstatsList[["ASD"]][, c("SNP","A1","A2","FREQ","BETA","SE","P","N")]
+```
+
+```{r}
+# check
+for (x in names(sumstatsList)){
+  print(head(sumstatsList[[x]]))
+  rm(x)
+}
+
+# export ~ 2.5 min
+for (x in names(sumstatsList)){
+  write.table(sumstatsList[[x]], file = paste0("./data_input/data_COJO/input/", x,".ma"), 
+              sep = "\t", row.names = FALSE, col.names = TRUE, quote = FALSE)  
+  rm(x)
+}
+
+# manually select "highe power" group (low p values, much longer when running COJO)
+## higher power: AD, MDD, SCZ
+```
+
+
+### [2] GCTA-COJO
+Tutorial: https://yanglab.westlake.edu.cn/software/gcta/#COJO
+
+Setup
+  - download gcta Mac version from https://yanglab.westlake.edu.cn/software/gcta/#Download
+  - the first time running COJO would trigger a warning message that the mac has blocked this unknown software
+  - open system settings - privacy & security - security, click on the warning about gcta64 and allow access
+
+```{bash}
+cd $HOME/Downloads/project_EHB/data_input/data_COJO/gcta-1.94.4-macOS-arm64
+export PLINK=$HOME/Downloads/project_EHB/data_input/LDSC/plink_files
+
+# run COJO for GWAS studies with moderate power (p cutoff = 1e-6) ~ 15-20 min
+ls ../input/*.ma | parallel -j 8 --bar '
+  sumstats={}
+  disease=$(basename $sumstats | cut -d "/" -f 3 | cut -d "." -f 1)
+  mkdir ../output/${disease}
+  for chr in {1..22}; do
+    ./gcta64 --bfile ${PLINK}/1000G.EUR.hg38.${chr} --maf 0.01 --cojo-file $sumstats --cojo-slct --cojo-p 1e-6 --out ../output/${disease}/chr${chr}
+  done
+'
+```
+
+```{bash}
+# run COJO for GWAS studies with higher power (lower p cutoff = 1e-8) ~ 11 min
+ls ../input/higher/*.ma | parallel -j 3 --bar '
+  sumstats={}
+  disease=$(basename $sumstats | cut -d "/" -f 4 | cut -d "." -f 1)
+  mkdir ../output/${disease}
+  for chr in {1..22}; do
+    ./gcta64 --bfile ${PLINK}/1000G.EUR.hg38.${chr} --maf 0.01 --cojo-file $sumstats --cojo-slct --cojo-p 1e-8 --out ../output/${disease}/chr${chr}
+  done
+'
+```
+
+```{r}
+# import top SNPs
+lead_snps_list <- list()
+for (disease in list.files("./data_input/data_COJO/output")){
+  lead_snps <- list()
+  for (x in list.files(paste0("./data_input/data_COJO/output/", disease), pattern = "\\.jma.cojo", full.names = TRUE)){
+    lead_snps[[x]] <- read.table(x, header = TRUE, sep = "\t", stringsAsFactors = FALSE)  
+  }
+  lead_snps <- do.call(rbind, lead_snps)
+  row.names(lead_snps) <- NULL
+  lead_snps_list[[disease]] <- lead_snps
+  rm(x, disease, lead_snps)
+}
+```
+
+
+### [3] FINEMAP
+```{r}
+# remove duplicated SNPs ~ 1 min
+for (x in names(sumstatsList)){
+  print(x)
+  y <- length(unique(sumstatsList[[x]]$SNP)) == nrow(sumstatsList[[x]])
+  if (y==FALSE){
+    print("filtering")
+    sumstatsList[[x]] <- sumstatsList[[x]] %>% distinct(SNP, .keep_all=TRUE)  
+  }
+  rm(x,y)
+}
+
+# get SNP positions
+SNP_pos <- list()
+for (x in list.files("./data_input/LDSC/plink_files", full.names = TRUE, pattern = "\\.bim$")){
+  SNP_pos[[x]] <- as.data.frame(fread(x, col.names = c("CHR", "SNP", "CM", "BP", "A1", "A2")))
+  rm(x)
+}
+names(SNP_pos) <- sub("./data_input/LDSC/plink_files/1000G.EUR.hg38.","",names(SNP_pos))
+names(SNP_pos) <- sub(".bim","",names(SNP_pos))
+names(SNP_pos) <- paste0("chr",names(SNP_pos))
+```
+
+```{r}
+# case-control trait ~ 2.5 min
+finemapping <- list()
+for (x in names(sumstatsList)[!names(sumstatsList) %in% c("cogG4","cogG6")]){
+  print(x)
+  for (i in 1:nrow(lead_snps_list[[x]])){
+    print(i)
+    chr <- paste0("chr", lead_snps_list[[x]][i,"Chr"])
+    pos <- lead_snps_list[[x]][i,"bp"]
+    nearby_snps <- SNP_pos[[chr]][SNP_pos[[chr]]$BP >=  pos - 500000 & SNP_pos[[chr]]$BP <= pos + 500000,]$SNP
+    windows <- sumstatsList[[x]][sumstatsList[[x]]$SNP %in% nearby_snps,]
+    windows <- windows %>% mutate(MAF = ifelse(FREQ>0.5, 1-FREQ, FREQ)) %>% filter(MAF>0.01) %>% filter(BETA!=0)
+    
+    if (nrow(windows) != 0){
+      # ABF finemapping for *case-control* trait
+      coloc_ds_input <- list(type="cc", pvalues=windows$P, N=windows$N, MAF=windows$MAF, beta=windows$BETA,
+                             varbeta=(windows$SE^2), snp=windows$SNP)
+      out <- coloc::finemap.abf(coloc_ds_input)
+      
+      # filter to a 95% credible set
+      finemapping[[x]][[i]]  <- out %>%  filter(as.character(prior) == as.character(1e-04)) %>% arrange(-SNP.PP) %>%
+        mutate(SNP.PP.cumsum = cumsum(SNP.PP)) %>% mutate(incl95cs = ifelse( round(SNP.PP.cumsum, 2) <= 0.95, TRUE, FALSE )) %>%
+        mutate(LDsentinel = ifelse (snp == lead_snps_list[[x]][i,"SNP"], TRUE, FALSE)) %>% filter(incl95cs == TRUE)
+    }
+  }
+  rm(x, i, chr, pos,nearby_snps, windows, coloc_ds_input, out)
+}
+```
+
+```{r}
+# quantitative trait ~ 
+for (x in c("cogG4","cogG6")){
+  print(x)
+  for (i in 1:nrow(lead_snps_list[[x]])){
+    print(i)
+    chr <- paste0("chr", lead_snps_list[[x]][i,"Chr"])
+    pos <- lead_snps_list[[x]][i,"bp"]
+    nearby_snps <- SNP_pos[[chr]][SNP_pos[[chr]]$BP >=  pos - 500000 & SNP_pos[[chr]]$BP <= pos + 500000,]$SNP
+    windows <- sumstatsList[[x]][sumstatsList[[x]]$SNP %in% nearby_snps,]
+    windows <- windows %>% mutate(MAF = ifelse(FREQ>0.5, 1-FREQ, FREQ)) %>% filter(MAF>0.01) %>% filter(BETA!=0)
+    
+    if (nrow(windows) != 0){
+      # ABF finemapping for *quantitative* trait
+      coloc_ds_input <- list(type="quant", pvalues=windows$P, N=windows$N, MAF=windows$MAF, beta=windows$BETA,
+                             varbeta=(windows$SE^2), snp=windows$SNP)
+      out <- coloc::finemap.abf(coloc_ds_input)
+      
+      # filter to a 95% credible set
+      finemapping[[x]][[i]]  <- out %>%  filter(as.character(prior) == as.character(1e-04)) %>% arrange(-SNP.PP) %>%
+        mutate(SNP.PP.cumsum = cumsum(SNP.PP)) %>% mutate(incl95cs = ifelse( round(SNP.PP.cumsum, 2) <= 0.95, TRUE, FALSE )) %>%
+        mutate(LDsentinel = ifelse (snp == lead_snps_list[[x]][i,"SNP"], TRUE, FALSE)) %>% filter(incl95cs == TRUE)
+    }
+  }
+  rm(x, i, chr, pos,nearby_snps, windows, coloc_ds_input, out)
+}
+```
+
+```{r}
+## combine result for each GWAS
+# remove duplicated SNPs, keeping the occurrence with the highest posterior probability
+for (x in names(finemapping)){
+  print(x)
+  if (length(finemapping[[x]])>0){
+    finemapping[[x]] <- do.call(rbind, finemapping[[x]])
+    finemapping[[x]] <- finemapping[[x]] %>% arrange(desc(SNP.PP)) %>% distinct(snp, .keep_all=TRUE) 
+  }
+  rm(x)
+}
+```
+
+```{r}
+# save SNP & PP info as .bed ~ 1 min
+SNP_pos_full <- do.call(rbind, SNP_pos)
+for (x in names(finemapping)){
+  print(x)
+  if (length(finemapping[[x]])>0){
+    colnames(finemapping[[x]])[5] <- 'SNP'
+    table <- finemapping[[x]][finemapping[[x]]$SNP %in% sumstatsList[[x]]$SNP, c('SNP','SNP.PP')]
+    table <- merge(table,SNP_pos_full[,c("SNP","CHR","BP")],by='SNP')
+    table$CHR <- paste0('chr',table$CHR)
+    table$start <- table$BP-1
+    table <- table[,c("CHR","start","BP",'SNP','SNP.PP')]
+    write.table(table, paste0("./data_input/SCAVENGE_input/",x,".bed"), sep="\t",row.names = F,quote = F,col.names = F)
+  }
+  rm(x, table)
+}
+```
+
+### [4] save finemapping
+```{r}
+save.image("./data_rda/Script4/finemapping.RData")
+
+# remove all objects
+gc()
+```
+
+
+## (2) SCAVENGE 
+### [1] all peaks
+#### peak matrix
+```{r}
+# all peaks
+load("./data_rda/Script1/PeakMatrix.rda")
+PeakMatrix  # 526880 peaks, 75136 cells
+```
+
+#### run SCAVENGE
+```{r}
+# get batch-corrected LSI matrix
+load("./data_rda/Script3/ArchR_Project.rda")
+rm(ArchR_EHB_5ct, EHB_10x_samples, ctMarkers, ctMarkers_class)
+lsi_mat <- ArchR_EHB@reducedDims@listData$Harmony_age@listData$matDR
+
+# construct m-knn graph ~ 2 min
+mutual_knn <- getmutualknn(lsimat = lsi_mat, num_k = 30)
+rm(lsi_mat)
+```
+
+```{r}
+# make SummarizedExperiment: 532891 peaks, 75136 cells
+SE_all <- SummarizedExperiment(assays = list(counts = assay(PeakMatrix)), 
+                               rowRanges = rowRanges(PeakMatrix), 
+                               colData = DataFrame(names = colnames(assay(PeakMatrix))))
+assayNames(SE_all) <- "counts"
+SE_all <- addGCBias(SE_all, genome = BSgenome.Hsapiens.UCSC.hg38)
+SE_all_bg <- getBackgroundPeaks(SE_all, niterations=200)
+rm(PeakMatrix)
+gc()
+```
+
+```{r}
+# run SCAVENGE ~ 3 min
+set.seed(100)
+mutual_knn_all <- list()
+mono_mat_all <- list()
+for (x in list.files("./data_input/SCAVENGE_input", full.names = TRUE)){
+  disease <- sub(".bed","",sub("./data_input/SCAVENGE_input/","",x))
+  print(disease)
+  
+  # gchromVAR analysis ~ 1-2 min
+  print("gchromVAR analysis...")
+  SNP_PP <- importBedScore(rowRanges(SE_all), x, colidx = 5)
+  SE_all_dev <- computeWeightedDeviations(SE_all, weights = SNP_PP, background_peaks = SE_all_bg)
+  rm(SNP_PP)
+  
+  # processing z score ~ 1 sec
+  # - filter out NA z score, otherwise seedindex() returns "missing value where TRUE/FALSE needed"
+  # - remove infinite z score, otherwise scale-factor = Inf
+  print("processing z score...")
+  z_score_mat <- na.omit(data.frame(colData(SE_all), z_score=t(assays(SE_all_dev)[["z"]]) |> c()))
+  z_score_mat <- z_score_mat[is.finite(z_score_mat$z_score),]
+  seed_idx <- seedindex(z_score = z_score_mat$z_score, percent_cut = 0.05) # using top 5% cells as seed
+  scale_factor <- cal_scalefactor(z_score = z_score_mat$z_score, percent_cut = 0.01)
+  rm(SE_all_dev)
+  
+  # network propagation ~ 3 sec
+  print("network propagation...")
+  np_score <- randomWalk_sparse(intM = mutual_knn, queryCells = rownames(mutual_knn)[seed_idx], gamma = 0.05)
+  omit_idx <- np_score==0
+  mutual_knn_all[[disease]] <- mutual_knn[!omit_idx, !omit_idx]
+  np_score <- np_score[!omit_idx]
+  TRS <- capOutlierQuantile(x = np_score, q_ceiling = 0.95) |> max_min_scale()
+  TRS <- TRS * scale_factor
+  mono_mat_all[[disease]] <- data.frame(z_score_mat[!omit_idx, ], seed_idx = seed_idx[!omit_idx], np_score, TRS)
+  rm(x, disease, z_score_mat, seed_idx, scale_factor, np_score, omit_idx, TRS)
+}
+```
+
+
+### [2] ct-spc peaks - 5ct
+#### peak matrix
+```{r}
+# load data
+load("./data_rda/Script3/ctMarkerPeaks_bulk.rda")
+ctPeaks <- getMarkers(ctMarkerPeaks_bulk, cutOff = "FDR <= 0.05 & Log2FC >= 0.6") # use a relaxed filter to make sure downstream runs smoothly!
+load("./data_rda/Script1/PeakMatrix.rda")
+PeakMatrix # 526880 peaks
+peaks <- rowRanges(PeakMatrix)
+
+# find overlap
+overlap <- list()
+for (x in names(ctPeaks)){
+  peaks_ct <- GRanges(seqnames = ctPeaks[[x]]$seqnames, ranges = IRanges(start = ctPeaks[[x]]$start, end = ctPeaks[[x]]$end))
+  overlap[[x]] <- which(peaks %in% peaks_ct)  
+  rm(x, peaks_ct)
+}
+overlap <- as.vector(unlist(overlap))
+overlap <- unique(overlap)
+
+# filter peak matrix: number of peaks is correct
+PeakMatrix_ct <- PeakMatrix[overlap, ]
+dim(PeakMatrix_ct) 
+### 123096 peaks, FDR <= 0.05 & logFC >= 0.6, skip permutation: ANX, cogG4, cogG6 ###
+# 85563 peaks, FDR <= 0.01 & logFC >= 0.6 (true ct-spc), skip permutation: ANX, BP, cogG4, cogG6
+
+# clean up
+rm(ctPeaks, PeakMatrix, ctMarkerPeaks_bulk, peaks, overlap)
+gc()
+```
+
+#### run SCAVENGE
+```{r}
+# make SummarizedExperiment: 123096 peaks, 75136 cells
+SE_ct <- SummarizedExperiment(assays = list(counts = assay(PeakMatrix_ct)), 
+                              rowRanges = rowRanges(PeakMatrix_ct), 
+                              colData = DataFrame(names = colnames(assay(PeakMatrix_ct))))
+SE_ct[,colnames(SE_ct) %in% ArchR_EHB_5ct$cellNames]
+
+
+assayNames(SE_ct) <- "counts"
+SE_ct <- addGCBias(SE_ct, genome = BSgenome.Hsapiens.UCSC.hg38)
+SE_ct_bg <- getBackgroundPeaks(SE_ct, niterations=200)
+rm(PeakMatrix_ct)
+gc()
+```
+
+```{r}
+# run SCAVENGE ~ 1 min
+set.seed(100)
+mutual_knn_ct <- list()
+mono_mat_ct <- list()
+
+for (x in list.files("./data_input/SCAVENGE_input", full.names = TRUE)){
+  disease <- sub(".bed","",sub("./data_input/SCAVENGE_input/","",x))
+  print(disease)
+  
+  # gchromVAR analysis
+  print("gchromVAR analysis...")
+  SNP_PP <- importBedScore(rowRanges(SE_ct), x, colidx = 5)
+  SE_ct_dev <- computeWeightedDeviations(SE_ct, weights = SNP_PP, background_peaks = SE_ct_bg) # may generate NA
+  rm(SNP_PP)
+  
+  # processing z score
+  # - filter out NA z score, otherwise seedindex() returns "missing value where TRUE/FALSE needed"
+  # - remove infinite z score, otherwise scale-factor = Inf
+  print("processing z score...")
+  z_score_mat <- na.omit(data.frame(colData(SE_ct), z_score=t(assays(SE_ct_dev)[["z"]]) |> c()))
+  z_score_mat <- z_score_mat[is.finite(z_score_mat$z_score),]
+  seed_idx <- seedindex(z_score = z_score_mat$z_score, percent_cut = 0.05) # using top 5% cells as seed
+  scale_factor <- cal_scalefactor(z_score = z_score_mat$z_score, percent_cut = 0.01)
+  rm(SE_ct_dev)
+  
+  # network propagation
+  print("network propagation...")
+  np_score <- randomWalk_sparse(intM = mutual_knn, queryCells = rownames(mutual_knn)[seed_idx], gamma = 0.05) 
+  omit_idx <- np_score==0
+  mutual_knn_ct[[disease]] <- mutual_knn[!omit_idx, !omit_idx]
+  np_score <- np_score[!omit_idx]
+  TRS <- capOutlierQuantile(x = np_score, q_ceiling = 0.95) |> max_min_scale()
+  TRS <- TRS * scale_factor
+  mono_mat_ct[[disease]] <- data.frame(z_score_mat[!omit_idx, ], seed_idx = seed_idx[!omit_idx], np_score, TRS)
+  
+  rm(x, disease, z_score_mat, seed_idx, scale_factor, np_score, omit_idx, TRS)
+  
+  gc()
+}
+```
+
+
+### [3] plotting
+#### supp fig - grid all peaks
+```{r}
+# TRS UMAP
+p <- list()
+for (x in names(mono_mat_ct)){
+  # calculate standardised TRS (z transformation)
+  TRS <- mono_mat_ct[[x]]
+  TRS$TRS_norm <- (TRS$TRS - mean(TRS$TRS)) / sd(TRS$TRS)
+
+  # prapare data for UMAP
+  umap <- ArchR_EHB@embeddings@listData[["UMAP"]]@listData[["df"]]
+  names(umap) <- c("umap1","umap2")
+  umap$cell <- row.names(umap)
+  transfer <- merge(umap, TRS, by.x = "cell", by.y = "names")
+  
+  # UMAP
+  p <- append(p, list(ggplot(transfer, aes(umap1,umap2,colour=TRS_norm)) + 
+    geom_point(size = 0.01) + theme_classic() + ggtitle(x) +
+    scale_colour_gradientn(colours = c("#badbff","#d1e7ff","#dce9f7","#ebf2fa","#f5f7fa","white",
+                                       "#FFFFCC","#FED976","#FEB255","#FC6622","#EE2211","#CC0022","#990000"), 
+                           limits = c(-2, 2.5)) +
+    theme(axis.line = element_blank(), axis.ticks = element_blank(),
+          axis.text = element_blank(), axis.title = element_blank(),
+          plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+          legend.position = "right", plot.margin = unit(c(0.5,0,0.5,0),"cm"))))
+  
+  # prepare data for bar plot, split into celltype-region groups
+  transfer <- data.frame(cell = ArchR_EHB$cellNames, ctRegion = ArchR_EHB$ctRegion)
+  transfer <- merge(transfer, TRS, by.x = "cell", by.y = "names")
+  transfer$celltype <- sub("_.*","",transfer$ctRegion)
+  transfer$region <- sub(".*_","",transfer$ctRegion)
+  transfer <- transfer[order(transfer$celltype, transfer$region),]
+  transfer$region <- factor(transfer$region, levels = c("FB","CP","MD"))
+  transfer$celltype <- factor(transfer$celltype, levels = c("Erythroblast", "Fibroblast", "Glioblast", "RG","n-IPC","Neuroblast","Neuron"))
+  
+  # test for cell-type-specific enrichment (whether the group average TRS-transform values significantly differs from all cells)
+  significance <- data.frame()
+  for (y in unique(transfer$ctRegion)){
+    sig <- t.test(transfer$TRS_norm[transfer$ctRegion==y], transfer$TRS_norm, alternative = "greater")
+    significance <- rbind(significance, c(y, sig$p.value))
+  }
+  names(significance) <- c("ctRegion","p")
+  significance$FDR <- as.numeric(significance$p) * nrow(significance)
+  significance$sig <- ""
+  significance$sig[significance$FDR < 0.01] <- "*"
+  significance$celltype <- sub("_.*","",significance$ctRegion)
+  significance$region <- sub(".*_","",significance$ctRegion)
+  significance$region <- factor(significance$region, levels = c("FB","CP","MD"))
+  significance$position <- max(transfer$TRS_norm) + 0.05
+  
+  # bar plot 
+  p <- append(p, list(
+    ggplot(transfer,aes(x=celltype, y=TRS_norm))  +
+    geom_boxplot(aes(fill = celltype), outlier.shape=NA) + 
+    scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+    pretty_plot(fontsize = 15) + facet_wrap(~region) + 
+    scale_alpha_manual(values = c("FB" = 1, "CP" = 0.75, "MD" = 0.5)) +
+    scale_fill_manual(values = c(Erythroblast="#f75c63", Fibroblast="#d1a279", Neuron="#3ee2ff", Neuroblast="#00cfff",
+                              "n-IPC" = "#40a1ff", RG="#836dff", Glioblast="#c47df0")) +
+    theme(axis.title.x = element_blank(), axis.text.x = element_blank(), axis.ticks.x = element_blank(),
+          axis.title.y = element_blank(), strip.text = element_text(size = 15), legend.position = "none") +
+    geom_text(data = significance, aes(x = celltype, y = position, label = sig), inherit.aes = FALSE, size = 5) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "red", linewidth = 1))) 
+
+  rm(x, TRS, umap, transfer, y, significance, sig)
+}
+p[[1]]
+```
+
+```{r}
+png("./ArchR_EHB/Plots/Script4/grid_SCAVENGE_ctpeaks_morepeaks.png", width = 4000, height = 2500, res = 300)
+gridExtra::grid.arrange(grobs = p, ncol = 6, widths = c(2,5,2,5,2,5))
+dev.off()
+```
+
+```{r}
+rm(SE_ct, SE_ct_bg, p)
+gc()
+```
+
+
+#### main fig - grid ct peaks
+```{r}
+# TRS UMAP
+p <- list()
+summary <- list()
+for (x in names(mono_mat_ct)){
+  # calculate standardised TRS (z transformation)
+  TRS <- mono_mat_ct[[x]]
+  TRS$TRS_norm <- (TRS$TRS - mean(TRS$TRS)) / sd(TRS$TRS)
+
+  # prapare data for UMAP
+  umap <- ArchR_EHB_5ct@embeddings@listData[["UMAP"]]@listData[["df"]]
+  names(umap) <- c("umap1","umap2")
+  umap$cell <- row.names(umap)
+  transfer <- merge(umap, TRS, by.x = "cell", by.y = "names")
+  
+  # UMAP
+  p <- append(p, list(ggplot(transfer, aes(umap1,umap2,colour=TRS_norm)) + 
+    geom_point(size = 0.01) + theme_classic() + ggtitle(x) +
+    scale_colour_gradientn(colours = c("#badbff","#d1e7ff","#dce9f7","#ebf2fa","#f5f7fa","white",
+                                       "#FFFFCC","#FED976","#FEB255","#FC6622","#EE2211","#CC0022","#990000"), limits = c(-2, 2.5)) +
+    theme(axis.line = element_blank(), axis.ticks = element_blank(),
+          axis.text = element_blank(), axis.title = element_blank(),
+          plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+          legend.position = "none", plot.margin = unit(c(0.5,0,0.5,0),"cm"))))
+  
+  # prepare data for bar plot, split into celltype-region groups
+  transfer <- data.frame(cell = ArchR_EHB_5ct$cellNames, ctRegion = ArchR_EHB_5ct$ctRegion)
+  transfer <- merge(transfer, TRS, by.x = "cell", by.y = "names")
+  transfer$celltype <- sub("_.*","",transfer$ctRegion)
+  transfer$region <- sub(".*_","",transfer$ctRegion)
+  transfer <- transfer[order(transfer$celltype, transfer$region),]
+  transfer$region <- factor(transfer$region, levels = c("FB","CP","MD"))
+  transfer$celltype <- factor(transfer$celltype, levels = c("Erythroblast", "Fibroblast", "Glioblast", "RG","n-IPC","Neuroblast","Neuron"))
+  
+  # test for cell-type-specific enrichment (whether the group average TRS-transform values significantly differs from all cells)
+  significance <- data.frame()
+  for (y in unique(transfer$ctRegion)){
+    sig <- t.test(transfer$TRS_norm[transfer$ctRegion==y], transfer$TRS_norm, alternative = "greater")
+    significance <- rbind(significance, c(y, sig$p.value))
+  }
+  names(significance) <- c("ctRegion","p")
+  significance$FDR <- as.numeric(significance$p) * nrow(significance)
+  significance$sig <- ""
+  significance$sig[significance$FDR < 0.01] <- "*"
+  significance$celltype <- sub("_.*","",significance$ctRegion)
+  significance$region <- sub(".*_","",significance$ctRegion)
+  significance$region <- factor(significance$region, levels = c("FB","CP","MD"))
+  significance$position <- max(transfer$TRS_norm) + 0.02
+  summary[[x]] <- significance
+  
+  # bar plot 
+  p <- append(p, list(
+    ggplot(transfer,aes(x=celltype, y=TRS_norm))  +
+    geom_boxplot(aes(fill = celltype), outlier.shape=NA) + 
+    scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+    pretty_plot(fontsize = 15) + facet_wrap(~region) + 
+    scale_fill_manual(values = c(Neuron="#3ee2ff", Neuroblast="#00cfff", "n-IPC" = "#40a1ff", RG="#836dff", Glioblast="#c47df0")) +
+    theme(axis.title.x = element_blank(), axis.text.x = element_blank(), axis.ticks.x = element_blank(),
+          axis.title.y = element_blank(), strip.text = element_text(size = 15), legend.position = "none",
+          strip.background = element_blank(), strip.placement = "outside") +
+    geom_text(data = significance, aes(x = celltype, y = position, label = sig), inherit.aes = FALSE, size = 5) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "red", linewidth = 1))) 
+
+  rm(x, TRS, umap, transfer, y, significance, sig)
+}
+```
+
+```{r}
+png("./ArchR_EHB/Plots/Script4/grid_SCAVENGE_ctpeaks_5ct_0.05_0.6.png", width = 4500, height = 1600, res = 250)
+gridExtra::grid.arrange(grobs = p, ncol = 8, widths = c(2,5,2,5,2,5,2,5))
+dev.off()
+```
+
+```{r}
+rm(SE_ct, SE_ct_bg, p)
+gc()
+```
+
+```{r}
+# summary of significant results
+for (x in names(summary)){
+  print(x)
+  print(summary[[x]][summary[[x]]$sig == "*", "ctRegion"])
+  rm(x)
+}
+```
+
+
+## (3) permutation
+Permutation: to establish a statistical significance threshold for identifying significant trait-cell association
+-> for *ct-spc-peak* SCAVENGE
+
+### [1] all peaks
+```{r temp}
+# check that there is no NA due to index mismatch in network propagation
+for (x in names(mono_mat_all)){
+  print(anyNA(mono_mat_all[[x]]))
+  rm(x)
+}
+```
+
+```{r}
+# sanity check: run each code for 2 seconds to make sure they can initiate properly
+x <- names(mono_mat_all)[11]
+mono_permu <- get_sigcell_simple(mutual_knn_all[[x]], mono_mat_all[[x]]$seed_idx, mono_mat_all[[x]]$np_score, 
+                                   permutation_times=1000, true_cell_significance=0.001, rw_gamma=0.05)
+```
+
+```{r}
+# run permutation ~ 100 min
+mono_mat_permu_all <- pbmclapply(names(mono_mat_all), function(x) {
+  mono_permu <- get_sigcell_simple(mutual_knn_all[[x]], mono_mat_all[[x]]$seed_idx, mono_mat_all[[x]]$np_score, 
+                                   permutation_times = 1000, true_cell_significance = 0.001, rw_gamma = 0.05)
+  result_df <- data.frame(mono_mat_all[[x]], mono_permu)
+  return(result_df)
+}, mc.cores = 4) # only <= 4 performance cores can use 100% CPU, plus one core for base R - this is a limit for Rstudio rsession and Terminal R
+```
+
+### [2] ct peaks - 5ct lenient
+```{r}
+# check that the 
+select <- vector()
+for (x in names(mono_mat_ct)){
+  if (!anyNA(mono_mat_ct[[x]])){
+    select <- c(select, x)
+  }
+  rm(x)
+}
+select
+```
+
+```{r}
+# sanity check: run each code for 2 seconds to make sure they can initiate properly
+x <- names(mono_mat_all)[11]
+mono_permu <- get_sigcell_simple(mutual_knn_ct[[x]], mono_mat_ct[[x]]$seed_idx, mono_mat_ct[[x]]$np_score, 
+                                   permutation_times=1000, true_cell_significance=0.001, rw_gamma=0.05)
+```
+
+```{r}
+# run permutation ~ 70 min
+mono_mat_permu_ct <- pbmclapply(select, function(x) {
+  mono_permu <- get_sigcell_simple(mutual_knn_ct[[x]], mono_mat_ct[[x]]$seed_idx, mono_mat_ct[[x]]$np_score, 
+                                   permutation_times = 1000, true_cell_significance = 0.001, rw_gamma = 0.05)
+  result_df <- data.frame(mono_mat_ct[[x]], mono_permu)
+  return(result_df)
+}, mc.cores = 4) # using <= 4 performance cores; or all 8 after restarting the computer - memory and CPU both not full
+```
+
+
+### [3] plotting
+```{r}
+## check that the order in the lists matches the order of the studies, then add study names
+
+# all peaks
+for (x in 1:length(mono_mat_permu_all)){
+  print(sum(mono_mat_permu_all[[x]]$TRS == mono_mat_all[[x]]$TRS) == nrow(mono_mat_permu_all[[x]]))
+  rm(x)
+}
+names(mono_mat_permu_all) <- names(mono_mat_all)
+
+# ct peaks
+for (x in 1:length(mono_mat_permu_ct)){
+  print(sum(mono_mat_permu_ct[[x]]$TRS == mono_mat_ct[select][[x]]$TRS) == nrow(mono_mat_permu_ct[[x]]))
+  rm(x)
+}
+names(mono_mat_permu_ct) <- names(mono_mat_ct[select])
+rm(select)
+```
+
+
+#### supp fig - heatmap all peaks
+```{r}
+# get proportions in each ct-region
+sig_summary <- data.frame()
+for (x in names(mono_mat_permu_all)){
+  sigCells <- mono_mat_permu_all[[x]]$names[mono_mat_permu_all[[x]]$true_cell_top_idx == TRUE]
+  for (y in unique(ArchR_EHB$ctRegion)){
+    a <- sum(ArchR_EHB$cellNames %in% sigCells & ArchR_EHB$ctRegion==y)
+    b <- sum(ArchR_EHB$ctRegion==y)
+    sig_summary <- rbind(sig_summary, c(x,y,a,b,a/b))
+  }
+  rm(x, sigCells, a, b)
+}
+names(sig_summary) <- c("disease","ctRegion","sigCells","allCells","prop")
+sig_summary$prop <- as.numeric(sig_summary$prop)
+sig_summary$sigCells <- as.numeric(sig_summary$sigCells)
+sig_summary$allCells <- as.numeric(sig_summary$allCells)
+
+# compute odds ratio for each ct-Regoin proportion
+sig_summary$odds_ratio <- (sig_summary$sigCells / (sig_summary$allCells - sig_summary$sigCells)) / 
+  ((sum(sig_summary$sigCells) - sig_summary$sigCells) / (sum(sig_summary$allCells) - sum(sig_summary$sigCells) - (sig_summary$allCells - sig_summary$sigCells)))
+
+# perform two-sided hypergeometric test
+sig_summary$p_value <- phyper(sig_summary$sigCells - 1, sum(sig_summary$sigCells), 
+                              sum(sig_summary$allCells) - sum(sig_summary$sigCells), sig_summary$allCells, lower.tail = FALSE)
+sig_summary$FDR <- p.adjust(sig_summary$p_value, method = "BH")
+
+# significant cell types
+sig_summary$text <- round(sig_summary$odds_ratio, 1)
+sig_summary$text[sig_summary$FDR > 0.05] <- ""
+
+# add cell type, region
+sig_summary$celltype <- sub("_.*","",sig_summary$ctRegion)
+sig_summary$region <- sub(".*_","",sig_summary$ctRegion)
+sig_summary$region <- factor(sig_summary$region, levels = c("FB", "CP", "MD"))
+sig_summary$celltype <- factor(sig_summary$celltype, levels = 
+                                 c("Erythroblast", "Fibroblast", "Glioblast", "RG","n-IPC","Neuroblast","Neuron"))
+```
+
+```{r}
+# plotting
+ggplot(sig_summary, aes(x=region, y=disease, fill=prop*100)) +
+  geom_tile() + theme_bw() + facet_wrap(~celltype, ncol=7) + pretty_plot() +
+  geom_text(aes(label = text), color = "black") +
+  scale_fill_gradientn(colours = c("white","#FED976","#FEB255","#FC6622","#EE2211","#CC0022","#990000"), name = "% cell") +
+  xlab("") + ylab("") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 11),
+        axis.text.y = element_text(size = 11), strip.text = element_text(size = 12))
+```
+
+
+#### main fig - heatmap ct peaks
+```{r}
+# get proportions in each ct-region
+sig_summary <- data.frame()
+for (x in names(mono_mat_permu_ct)){
+  sigCells <- mono_mat_permu_ct[[x]]$names[mono_mat_permu_ct[[x]]$true_cell_top_idx == TRUE]
+  for (y in unique(ArchR_EHB_5ct$ctRegion)){
+    a <- sum(ArchR_EHB_5ct$cellNames %in% sigCells & ArchR_EHB_5ct$ctRegion==y)
+    b <- sum(ArchR_EHB_5ct$ctRegion==y)
+    sig_summary <- rbind(sig_summary, c(x,y,a,b,a/b))
+  }
+  rm(x, sigCells, a, b)
+}
+names(sig_summary) <- c("disease","ctRegion","sigCells","allCells","prop")
+sig_summary$prop <- as.numeric(sig_summary$prop)
+sig_summary$sigCells <- as.numeric(sig_summary$sigCells)
+sig_summary$allCells <- as.numeric(sig_summary$allCells)
+
+# compute odds ratio for each ct-Regoin proportion
+sig_summary$odds_ratio <- (sig_summary$sigCells / (sig_summary$allCells - sig_summary$sigCells)) / 
+  ((sum(sig_summary$sigCells) - sig_summary$sigCells) / (sum(sig_summary$allCells) - sum(sig_summary$sigCells) - (sig_summary$allCells - sig_summary$sigCells)))
+
+# perform two-sided hypergeometric test
+sig_summary$p_value <- phyper(sig_summary$sigCells - 1, sum(sig_summary$sigCells), 
+                              sum(sig_summary$allCells) - sum(sig_summary$sigCells), sig_summary$allCells, lower.tail = FALSE)
+sig_summary$FDR <- p.adjust(sig_summary$p_value, method = "BH")
+
+# significant cell types: FDR <= 0.05
+sig_summary$text <- round(sig_summary$odds_ratio, 1)
+sig_summary$text[sig_summary$FDR > 0.05] <- ""
+
+# add cell type, region
+sig_summary$celltype <- sub("_.*","",sig_summary$ctRegion)
+sig_summary$region <- sub(".*_","",sig_summary$ctRegion)
+sig_summary$region <- factor(sig_summary$region, levels = c("FB", "CP", "MD"))
+sig_summary$celltype <- factor(sig_summary$celltype, levels = c("Erythroblast", "Fibroblast", "Glioblast", "RG","n-IPC","Neuroblast","Neuron"))
+```
+
+```{r}
+# plotting
+ggplot(sig_summary, aes(x=region, y=disease, fill=prop*100)) +
+  geom_tile() + theme_bw() + facet_wrap(~celltype, ncol=7) + pretty_plot() +
+  geom_text(aes(label = text), color = "black") +
+  scale_fill_gradientn(colours = c("white","#FED976","#FEB255","#FC6622","#EE2211","#CC0022","#990000"), name = "% cell") +
+  xlab("") + ylab("") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 11),
+        axis.text.y = element_text(size = 11), strip.text = element_text(size = 12))
+```
+
+
+#### main fig - heatmap region
+##### Cerebellum
+```{r}
+# focus on CerebellumPons
+ArchR_EHB_5ct_fil <- ArchR_EHB_5ct[ArchR_EHB_5ct$Region=="CerebellumPons"]
+ArchR_EHB_5ct_fil$ctAge <- paste0(stri_replace_all_regex(ArchR_EHB_5ct_fil$ctAnnot_2.0,
+                                                    pattern = c("Neuronal IPC", "Radial glia"),
+                                                    replacement = c("n-IPC", "RG"), vectorize = FALSE), "_", 
+                                  ArchR_EHB_5ct_fil$Age)
+
+# get proportions in each ct-age
+sig_summary <- data.frame()
+for (x in names(mono_mat_permu_ct)){
+  sigCells <- mono_mat_permu_ct[[x]]$names[mono_mat_permu_ct[[x]]$true_cell_top_idx == TRUE]
+  for (y in unique(ArchR_EHB_5ct_fil$ctAge)){
+    a <- sum(ArchR_EHB_5ct_fil$cellNames %in% sigCells & ArchR_EHB_5ct_fil$ctAge==y)
+    b <- sum(ArchR_EHB_5ct_fil$ctAge==y)
+    sig_summary <- rbind(sig_summary, c(x,y,a,b,a/b))
+  }
+  rm(x, sigCells, a, b)
+}
+names(sig_summary) <- c("disease","ctAge","sigCells","allCells","prop")
+sig_summary$prop <- as.numeric(sig_summary$prop)
+sig_summary$sigCells <- as.numeric(sig_summary$sigCells)
+sig_summary$allCells <- as.numeric(sig_summary$allCells)
+
+# compute odds ratio for each ct-age proportion
+sig_summary$odds_ratio <- (sig_summary$sigCells / (sig_summary$allCells - sig_summary$sigCells)) / 
+  ((sum(sig_summary$sigCells) - sig_summary$sigCells) / (sum(sig_summary$allCells) - sum(sig_summary$sigCells) - (sig_summary$allCells - sig_summary$sigCells)))
+
+# perform two-sided hypergeometric test
+sig_summary$p_value <- phyper(sig_summary$sigCells - 1, sum(sig_summary$sigCells), 
+                              sum(sig_summary$allCells) - sum(sig_summary$sigCells), sig_summary$allCells, lower.tail = FALSE)
+sig_summary$FDR <- p.adjust(sig_summary$p_value, method = "BH")
+
+# significant cell types
+sig_summary$text <- round(sig_summary$odds_ratio, 1)
+sig_summary$text[sig_summary$FDR > 0.05] <- ""
+
+# add cell type, age
+sig_summary$celltype <- sub("_.*","",sig_summary$ctAge)
+sig_summary$age <- sub(".*_","",sig_summary$ctAge)
+sig_summary$celltype <- factor(sig_summary$celltype, levels = c("Erythroblast", "Fibroblast", "Glioblast", "RG","n-IPC","Neuroblast","Neuron"))
+```
+
+```{r}
+# selected neurodevelopmental disorders
+select <- c("ADHD","ASD","BP","PD")
+sig_summary <- sig_summary[sig_summary$disease %in% select,]
+
+# selected cell types
+select <- c("RG","n-IPC","Neuron")
+sig_summary <- sig_summary[sig_summary$celltype %in% select,]
+
+# plotting
+p1 <- ggplot(sig_summary, aes(x=age, y=disease, fill=prop*100)) +
+  geom_tile() + theme_bw() + facet_wrap(~celltype, ncol=1, strip.position = "right") + pretty_plot() +
+  geom_text(aes(label = text), color = "black") +
+  scale_fill_gradientn(colours = colorRampPalette(c("white", "#02b51f"))(7), name = "% cell") +
+  xlab("") + ylab("") + ggtitle("Cerebellum Pons") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 11),
+        axis.text.y = element_blank(), axis.ticks.y = element_blank(),
+        strip.text = element_text(size = 12), title = element_text(size = 12))
+```
+
+
+##### Forebrain
+```{r}
+# focus on Forebrain
+ArchR_EHB_5ct_fil <- ArchR_EHB_5ct[ArchR_EHB_5ct$Region=="Forebrain"]
+ArchR_EHB_5ct_fil$ctAge <- paste0(stri_replace_all_regex(ArchR_EHB_5ct_fil$ctAnnot_2.0,
+                                                    pattern = c("Neuronal IPC", "Radial glia"),
+                                                    replacement = c("n-IPC", "RG"), vectorize = FALSE), "_", 
+                                  ArchR_EHB_5ct_fil$Age)
+
+# get proportions in each ct-age
+sig_summary <- data.frame()
+for (x in names(mono_mat_permu_ct)){
+  sigCells <- mono_mat_permu_ct[[x]]$names[mono_mat_permu_ct[[x]]$true_cell_top_idx == TRUE]
+  for (y in unique(ArchR_EHB_5ct_fil$ctAge)){
+    a <- sum(ArchR_EHB_5ct_fil$cellNames %in% sigCells & ArchR_EHB_5ct_fil$ctAge==y)
+    b <- sum(ArchR_EHB_5ct_fil$ctAge==y)
+    sig_summary <- rbind(sig_summary, c(x,y,a,b,a/b))
+  }
+  rm(x, sigCells, a, b)
+}
+names(sig_summary) <- c("disease","ctAge","sigCells","allCells","prop")
+sig_summary$prop <- as.numeric(sig_summary$prop)
+sig_summary$sigCells <- as.numeric(sig_summary$sigCells)
+sig_summary$allCells <- as.numeric(sig_summary$allCells)
+
+# compute odds ratio for each ct-age proportion
+sig_summary$odds_ratio <- (sig_summary$sigCells / (sig_summary$allCells - sig_summary$sigCells)) / 
+  ((sum(sig_summary$sigCells) - sig_summary$sigCells) / (sum(sig_summary$allCells) - sum(sig_summary$sigCells) - (sig_summary$allCells - sig_summary$sigCells)))
+
+# perform two-sided hypergeometric test
+sig_summary$p_value <- phyper(sig_summary$sigCells - 1, sum(sig_summary$sigCells), 
+                              sum(sig_summary$allCells) - sum(sig_summary$sigCells), sig_summary$allCells, lower.tail = FALSE)
+sig_summary$FDR <- p.adjust(sig_summary$p_value, method = "BH")
+
+# significant cell types
+sig_summary$text <- round(sig_summary$odds_ratio, 1)
+sig_summary$text[sig_summary$FDR > 0.05] <- ""
+
+# add cell type, age
+sig_summary$celltype <- sub("_.*","",sig_summary$ctAge)
+sig_summary$age <- sub(".*_","",sig_summary$ctAge)
+sig_summary$celltype <- factor(sig_summary$celltype, levels = c("Erythroblast", "Fibroblast", "Glioblast", "RG","n-IPC","Neuroblast","Neuron"))
+```
+
+```{r}
+# selected neurodevelopmental disorders
+select <- c("ADHD","ASD","BP","PD")
+sig_summary <- sig_summary[sig_summary$disease %in% select,]
+
+# selected cell types
+select <- c("RG","n-IPC","Neuron")
+sig_summary <- sig_summary[sig_summary$celltype %in% select,]
+
+# plotting
+p2 <- ggplot(sig_summary, aes(x=age, y=disease, fill=prop*100)) +
+  geom_tile() + theme_bw() + facet_wrap(~celltype, ncol=1, strip.position = "right") + pretty_plot() +
+  geom_text(aes(label = text), color = "black") +
+  scale_fill_gradientn(colours = colorRampPalette(c("white", "#f5c20a"))(7), name = "% cell") +
+  xlab("") + ylab("") + ggtitle("Forebrain") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 11), 
+        axis.text.y = element_text(size = 11), 
+        strip.text = element_text(size = 12), title = element_text(size = 12))
+```
+
+
+##### combined
+```{r}
+p2 + p1 + plot_layout(guides = "collect")
+```
+
+
+## (4) save SCAVENGE
+```{r}
+# SCAVENGE
+save(ArchR_EHB, file = "./data_rda/Script4/ArchR_EHB.rda")
+save(mutual_knn, mutual_knn_all, mono_mat_all, file = "./data_rda/Script4/SCAVENGE_allpeaks.rda")
+save(mutual_knn, mutual_knn_ct, mono_mat_ct, file = "./data_rda/Script4/SCAVENGE_ctpeaks_7ct.rda")
+save(mutual_knn, mutual_knn_ct, mono_mat_ct, file = "./data_rda/Script4/SCAVENGE_ctpeaks_5ct.rda")
+
+# permutation
+save(mono_mat_permu_all, mono_mat_permu_ct, file = "./data_rda/Script4/permutation_result.rda")
+
+# final result
+save(mutual_knn, mutual_knn_all, mono_mat_all, mono_mat_permu_all,
+     mutual_knn_ct, mono_mat_ct, mono_mat_permu_ct, file = "./data_rda/Script4/SCAVENGE_FINAL.rda")
+```
+

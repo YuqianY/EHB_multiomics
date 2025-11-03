@@ -1,0 +1,1231 @@
+Neuroepithelial cell to radial glia transition mechanisms
+
+```{r}
+library(ArchR)
+addArchRGenome("hg38")
+
+library(tidyr)
+library(Seurat)
+library(WGCNA)
+library(hdWGCNA)
+library(patchwork)
+library(ComplexHeatmap)
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(stringi)
+library(ggh4x) # for facet_wrap2
+library(tibble)
+```
+
+
+
+# 1. Upstream TFs
+From ARCHS4: https://maayanlab.cloud/archs4/gene/ZEB2#correlation
+
+## (1) ZEB2 TFs
+```{r}
+# predicted TFs
+ZEB2_predictedTF <- read.table("./data_input/ZEB2_mechanism/ZEB2_predictedTF.txt", header=TRUE, sep = "\t")
+ZEB2_TFs <- sub(".*\\*\\ ","",sub("_.*","",ZEB2_predictedTF$Gene.Set))
+ZEB2_TFs <- unique(c(ZEB2_TFs, "SMAD2", "SMAD3", "TCF3","UBF1","UBF2","TCF3","TCE2A"))
+```
+
+```{r}
+# known motif positions for TFs
+load("./data_rda/Script6/ArchR_EHB_RG.rda")
+motifPositions <- getPositions(ArchR_EHB_RG)
+names(motifPositions) <- sub("_.*","",names(motifPositions))
+motifPositions_fil <- motifPositions[ZEB2_TFs[ZEB2_TFs %in% names(motifPositions)],]
+length(motifPositions_fil)
+rm(motifPositions)
+```
+
+
+## (2) gene score: 49 TFs
+```{r}
+# filter: keep TFs which have motif position info
+load("./data_rda/Script5/gene_score_matrix_RG.rda")
+gene_score_matrix_fil <- gene_score_matrix[match(names(motifPositions_fil), rownames(gene_score_matrix)),]
+rownames(gene_score_matrix_fil) == names(motifPositions_fil)
+gene_score_matrix_fil <- assay(gene_score_matrix_fil)
+rm(gene_score_matrix)
+gc()
+
+# average gene score
+gene_score_avg <- data.frame(matrix(ncol=0,nrow=nrow(gene_score_matrix_fil)))
+for (x in c("CS14","CS16","CS17","CS20","CS21")){
+  for (y in c("Forebrain","Medulla","CerebellumPons")){
+    fil <- gene_score_matrix_fil[, ArchR_EHB_RG$Age==x & ArchR_EHB_RG$Region==y]
+    gene_score_avg <- cbind(gene_score_avg, setNames(data.frame(rowMeans(fil)), paste0(y, "_", x)))
+  }
+  rm(x, y, fil)
+}
+```
+
+### supp - heatmap
+```{r}
+# cluster by row
+names(gene_score_avg) <- stri_replace_all_regex(names(gene_score_avg), pattern = c("Forebrain","CerebellumPons","Medulla"), 
+                                                replacement = c("FB","CP","MD"), vectorise_all = FALSE)
+columnsplit <- stri_replace_all_regex(sub("_.*","",names(gene_score_avg)), vectorise_all = FALSE,
+                                      pattern = c("FB","CP","MD"), replacement = c("Forebrain","CerebellumPons","Medulla"))
+columnsplit <- factor(columnsplit, levels = c("Forebrain", "CerebellumPons", "Medulla"))
+p <- ComplexHeatmap::Heatmap(as.matrix(gene_score_avg), cluster_rows = TRUE, cluster_columns = FALSE, 
+                        column_split= columnsplit, 
+                        col = c("white","#FED976","#FEB255","#FC6622","#EE2211","#CC0022","#990000"),
+                        heatmap_legend_param = list(legend_direction = "horizontal", legend_side = "bottom"), 
+                        name = "avg gene score", column_names_rot = 45)
+draw(p, heatmap_legend_side = "bottom")
+
+# get order correlation heatmap
+heatmap_order <- row_order(draw(p))
+heatmap_order <- p@row_names_param[["labels"]][heatmap_order]
+```
+
+```{r}
+# Which TFs  are in the same module as ZEB2 (hdWGCNA)?
+load("./data_rda/Script5/WGCNA_modules.rda")
+modules[modules$gene_name %in% unique(gene_score_avg$gene),c(1:3)] # BCL11B, MEIS1, SOX2, POU3F2
+```
+
+
+## (3) TF footprints
+Keep in mind: ZEB2 is just *one out of many* potential targets of these TFs!
+```{r}
+select <- c("SOX2","POU3F2","GBX2","MECOM","EBF1","TCF4","MEIS1","BCL11B")
+```
+
+```{r}
+## split by region, colour by age (looks like regional difference is more prominent than age differences)
+
+# create pseudobulks ~ 8 min
+set.seed(100)
+addArchRThreads(4)
+ArchR_EHB_RG <- addGroupCoverages(ArchR_EHB_RG, groupBy = "Sample", force = TRUE)
+save(ArchR_EHB_RG, file = "./data_rda/Script6/ArchR_EHB_RG.rda")
+
+# compute footprints ~ 1 min
+seFoot <- getFootprints(ArchR_EHB_RG, positions = motifPositions_fil[select], groupBy = "Sample")
+
+# plot footprints
+load("./data_rda/EHB_10x_samples.rda")
+library(stringi)
+
+for (x in unique(ArchR_EHB_RG$Region)){
+  seFoot2 <- seFoot
+  seFoot2@colData@listData[["Group"]] <- stri_replace_all_regex(seFoot2@colData@listData[["Group"]], 
+                                                                pattern = EHB_10x_samples$Name, 
+                                                                replacement = EHB_10x_samples$ID, vectorize_all = FALSE)
+  seFoot2 <- seFoot2[, seFoot2@colData@listData[["Group"]] %in% EHB_10x_samples$ID[EHB_10x_samples$Region==x]]
+  names(assays(seFoot2)) <- paste0(names(assays(seFoot2)), ": ", x)
+  plotFootprints(seFoot2, ArchRProj = ArchR_EHB_RG, normMethod = "Subtract", plotName = paste0("Script6/TF-Footprints_",x), 
+                 addDOC = FALSE, force = TRUE, pal = rev(c("#704D9E", "#BC5AA9", "#ED7C97", "#f79452", "#f2de5c")), baseSize = 8)  
+  rm(x, seFoot2)
+}
+```
+
+### supp fig - global
+```{r}
+# create pseudobulks ~ 3.6 min
+set.seed(100)
+addArchRThreads(4)
+ArchR_EHB_RG <- addGroupCoverages(ArchR_EHB_RG, groupBy = "Region", force = TRUE)
+save(ArchR_EHB_RG, file = "./data_rda/Script6/ArchR_EHB_RG.rda")
+```
+
+```{r}
+# compute footprints ~ 0.6 min
+seFoot <- getFootprints(ArchR_EHB_RG, positions = motifPositions_fil[select], groupBy = "Region")
+
+# load modified function
+source("./R_functions/Script3_FootprintPlot.R")
+
+# plot footprints for top TFs
+p <- list()
+for (x in select){
+  print(x)
+  p[[x]] <- FootprintPlot(seFoot, name = x, normMethod = "Subtract", smoothWindow = 5, 
+                          pal = c(Forebrain="#FDE333", CerebellumPons="#53CC67", Medulla="#009B95"))
+  rm(x)
+}
+
+# grid formatting
+for (i in 1:length(p)) {
+  p[[i]] <- p[[i]] + theme(plot.margin = unit(c(0, 0, 0, 0), "cm"))
+  if (i %ni% seq(1, length(p), by = 2)){
+    p[[i]] <- p[[i]] + ylab("")
+  }
+  if (i %in% 1:(length(p)-2)){
+    p[[i]] <- p[[i]] + xlab("")
+  }
+}
+```
+
+```{r}
+png("./ArchR_EHB/Plots/Script6/grid_footprint.png", width = 2000, height = 2500, res = 500)
+wrap_plots(p, ncol = 2)
+dev.off()
+```
+
+
+### fig - ZEB2 local (noisy)
+```{r}
+# get ZEB2 regulatory regions: TSS ± 500 kb
+ZEB2_GRanges <- ArchR_EHB_RG@geneAnnotation@listData[["genes"]][ArchR_EHB_RG@geneAnnotation@listData[["genes"]]$symbol%in%"ZEB2",]
+start(ZEB2_GRanges) <- pmax(start(ZEB2_GRanges) - 500000, 1)
+end(ZEB2_GRanges) <- start(ZEB2_GRanges) + 1000000
+end(ZEB2_GRanges) <- pmin(end(ZEB2_GRanges), seqlengths(ZEB2_GRanges)[as.character(seqnames(ZEB2_GRanges))]) # make sure the end position < chr length
+ZEB2_GRanges@ranges@width
+
+# find TF binding motifs in ZEB2 regulatory regions
+motifPositions_hits_in_ZEB2 <- GRangesList()
+for (x in names(motifPositions_fil)){
+  hits <- findOverlaps(motifPositions_fil[[x]], ZEB2_GRanges)
+  hits <- motifPositions_fil[[x]][queryHits(hits)]
+  if (length(hits)!=0){ # excluding genes with 0 hit
+    motifPositions_hits_in_ZEB2[[x]] <- GRangesList(hits)[[1]]
+  }
+  rm(x)
+}
+save(motifPositions_hits_in_ZEB2, file = "./data_rda/Script6/motifPositions_hits_in_ZEB2.rda")
+```
+
+```{r}
+# Tn5 insertion signal must not have too many 0s
+summary_Tn5 <- data.frame()
+for (x in names(seFoot@assays@data@listData)){
+  summary_Tn5 <- rbind(summary_Tn5, c(x, sum(rowMeans(seFoot@assays@data@listData[[x]])==0)))
+  rm(x)
+}
+names(summary_Tn5) <- c("gene", "count")
+summary_Tn5$count <- as.numeric(summary_Tn5$count)
+select_signal <- summary_Tn5$gene[summary_Tn5$count <= 80]
+select %in% select_signal
+
+# siganl too weak (cannot be plotted)
+select_signal <- select_signal[select_signal %ni% "NR3C1"]
+
+# footprinting
+seFoot <- getFootprints(ArchR_EHB_RG, positions = motifPositions_hits_in_ZEB2[select_signal], groupBy = "Region")
+plotFootprints(seFoot, ArchRProj = ArchR_EHB_RG, normMethod = "Subtract", plotName = "Script6/TF-Footprints_ZEB2_upstream", 
+               addDOC = FALSE, smoothWindow = 5, baseSize = 8, pal = c("#009B95","#FDE333", "#53CC67"))
+```
+
+```{r}
+# compute footprints ~ 0.6 min
+seFoot <- getFootprints(ArchR_EHB_RG, positions = motifPositions_hits_in_ZEB2[select], groupBy = "Region")
+
+# load modified function
+source("./R_functions/Script3_FootprintPlot.R")
+
+# plot footprints for top TFs
+p <- list()
+for (x in select){
+  print(x)
+  p[[x]] <- FootprintPlot(seFoot, name = x, normMethod = "Subtract", smoothWindow = 5, 
+                          pal = c(Forebrain="#FDE333", CerebellumPons="#53CC67", Medulla="#009B95"))
+  rm(x)
+}
+
+# grid formatting
+for (i in 1:length(p)) {
+  p[[i]] <- p[[i]] + theme(plot.margin = unit(c(0, 0, 0, 0), "cm"))
+  if (i %ni% seq(1, length(p), by = 2)){
+    p[[i]] <- p[[i]] + ylab("")
+  }
+  if (i %in% 1:(length(p)-2)){
+    p[[i]] <- p[[i]] + xlab("")
+  }
+}
+```
+
+```{r}
+png("./ArchR_EHB/Plots/Script6/grid_footprint_ZEB2regulatory.png", width = 2000, height = 2500, res = 500)
+wrap_plots(p, ncol = 2)
+dev.off()
+```
+
+
+## (4) TF chromVAR ~ TF GS
+```{r}
+# get chromVAR and geneScore for RG cells
+load("./data_rda/Script3/Spearman_correlation.rda")
+
+# filtering: RG
+sum(colnames(corInput_chromVAR) == colnames(corInput_geneScore)) == ncol(corInput_chromVAR)
+RG_chromVAR <- corInput_chromVAR[,corInput_geneScore$ctAnnot_2.0=="Radial glia"]
+RG_geneScore <- corInput_geneScore[,corInput_geneScore$ctAnnot_2.0=="Radial glia"]
+table(RG_geneScore$ctAnnot_2.0)
+
+rm(corInput_chromVAR, corInput_geneScore)
+gc()
+```
+
+```{r}
+# Spearman correlation, split by region and age ~ 1 min
+correlation_table <- data.frame()
+for (x in unique(RG_geneScore$Region)){
+  for(y in c("CS14","CS16","CS17","CS20","CS21")){
+    
+    fil_chromVAR <- RG_chromVAR[,RG_geneScore$Region==x & RG_geneScore$Age==y]
+    downsample <- sample(colnames(fil_chromVAR), min(1000,ncol(fil_chromVAR)), replace = FALSE) # downsample to n=1000
+    fil_chromVAR <- fil_chromVAR[,downsample]
+    fil_geneScore <- RG_geneScore[,downsample]
+    
+    for (z in rownames(RG_geneScore)){
+      out <- cor.test(fil_chromVAR[z,], as.vector(fil_geneScore[z,]@assays@data$GeneScoreMatrix), method = "spearman")
+      out <- data.frame(p_value = out$p.value, coefficient = out$estimate)  # coefficient = Spearman's rho
+      out$region <- x
+      out$age <- y
+      out$gene <- z
+      correlation_table <- rbind(correlation_table, out)
+    }
+  }
+  rm(x, y, z, out, fil_chromVAR, fil_geneScore)
+}
+row.names(correlation_table) <- NULL
+
+# multiple testing correction ~ grouping each sample (region & age), 775 genes and 775 tests
+correlation_table$FDR <- correlation_table$p_value
+for (x in unique(correlation_table$region)){
+  for (y in unique(correlation_table$age)){
+    correlation_table[correlation_table$region==x & correlation_table$age==y,]$FDR <- 
+      p.adjust(correlation_table[correlation_table$region==x & correlation_table$age==y,]$p_value, method = "BH")
+  }
+  rm(x,y)
+}
+correlation_table$mlog10FDR <- -log10(correlation_table$FDR)
+```
+
+### supp - heatmap
+```{r}
+# 49 potential ZEB regulators
+correlation_fil <- correlation_table[correlation_table$gene %in% ZEB2_TFs,]
+correlation_fil$sample <- paste0(stri_replace_all_regex(correlation_fil$region, 
+                                                          pattern = c("Forebrain","CerebellumPons","Medulla"), 
+                                                          replacement = c("FB","CP","MD"), vectorise_all = FALSE), 
+                                   "_",correlation_fil$age)
+correlation_FDR <- pivot_wider(correlation_fil[,c("gene","sample","FDR")], names_from = sample, values_from = FDR) %>% column_to_rownames(var = "gene")
+correlation_coefficient <- pivot_wider(correlation_fil[,c("gene","sample","coefficient")], names_from = sample, values_from = coefficient)  %>% column_to_rownames(var = "gene")
+correlation_FDR <- na.omit(correlation_FDR)
+correlation_coefficient <- na.omit(correlation_coefficient)
+
+# significance
+correlation_sig <- ifelse(correlation_FDR < 0.01, "*", "")
+
+# for later comparison
+correlation_self <- correlation_fil
+correlation_self$sig <- ifelse(correlation_fil$FDR < 0.01, "*", "")
+save(correlation_self, file = "./data_rda/Script6/correlation_self.rda")
+```
+
+```{r}
+# group by region
+columnsplit <- stri_replace_all_regex(sub("_.*","",names(correlation_coefficient)), vectorise_all = FALSE,
+                                      pattern = c("FB","CP","MD"), replacement = c("Forebrain","CerebellumPons","Medulla"))
+columnsplit <- factor(columnsplit, levels = c("Forebrain", "CerebellumPons", "Medulla"))
+
+# heatmap
+correlation_coefficient <- correlation_coefficient[heatmap_order,]
+correlation_sig <- correlation_sig[heatmap_order,]
+p <- ComplexHeatmap::Heatmap(as.matrix(correlation_coefficient), cluster_rows = FALSE, cluster_columns = FALSE, 
+                             column_split= columnsplit, col = c("blue","white","#EE2211"),
+                             heatmap_legend_param = list(legend_direction = "horizontal", legend_side = "right"), 
+                             name = "correlation: chromVAR ~ gene score", column_names_rot = 90,
+                             cell_fun = function(j, i, x, y, width, height, fill) {
+                               grid::grid.text(correlation_sig[i, j], x = x, y = y-unit(1, "mm"), gp = grid::gpar(fontsize = 15))})
+draw(p, heatmap_legend_side = "bottom")
+```
+
+
+## (5) TF chromVAR ~ ZEB2 GS
+```{r}
+# get chromVAR and geneScore for RG cells
+load("./data_rda/Script3/Spearman_correlation.rda")
+load("./data_rda/Script5/gene_score_matrix_RG.rda")
+
+# match cell order
+ZEB2_GS <- assay(gene_score_matrix["ZEB2",])
+sum(colnames(corInput_chromVAR) == colnames(corInput_geneScore)) == ncol(corInput_chromVAR)
+RG_chromVAR <- corInput_chromVAR[,corInput_geneScore$ctAnnot_2.0=="Radial glia"]
+RG_chromVAR <- RG_chromVAR[,colnames(ZEB2_GS)]
+RG_geneScore <- corInput_geneScore[,corInput_geneScore$ctAnnot_2.0=="Radial glia"] # keep for metadata
+sum(colnames(RG_chromVAR) == colnames(ZEB2_GS)) == length(ZEB2_GS)
+
+rm(corInput_chromVAR, corInput_geneScore, gene_score_matrix)
+gc()
+```
+
+```{r}
+# Spearman correlation, split by region and age ~ 1 min
+correlation_table <- data.frame()
+for (x in unique(RG_geneScore$Region)){
+  for(y in c("CS14","CS16","CS17","CS20","CS21")){
+    
+    fil_chromVAR <- RG_chromVAR[,RG_geneScore$Region==x & RG_geneScore$Age==y]
+    downsample <- sample(colnames(fil_chromVAR), min(1000,ncol(fil_chromVAR)), replace = FALSE) # downsample to n=1000
+    fil_chromVAR <- fil_chromVAR[,downsample]
+    fil_ZEB2_GS <- ZEB2_GS[,downsample]
+  
+    for (z in rownames(RG_chromVAR)){
+      out <- cor.test(fil_chromVAR[z,], fil_ZEB2_GS, method = "spearman")
+      out <- data.frame(p_value = out$p.value, coefficient = out$estimate)  # coefficient = Spearman's rho
+      out$region <- x
+      out$age <- y
+      out$gene <- z
+      correlation_table <- rbind(correlation_table, out)
+    }
+  }
+  rm(x, y, z, out, fil_chromVAR, fil_geneScore)
+}
+row.names(correlation_table) <- NULL
+
+# multiple testing correction ~ grouping each sample (region & age), 775 genes and 775 tests
+correlation_table$FDR <- correlation_table$p_value
+for (x in unique(correlation_table$region)){
+  for (y in unique(correlation_table$age)){
+    correlation_table[correlation_table$region==x & correlation_table$age==y,]$FDR <- 
+      p.adjust(correlation_table[correlation_table$region==x & correlation_table$age==y,]$p_value, method = "BH")
+  }
+  rm(x,y)
+}
+correlation_table$mlog10FDR <- -log10(correlation_table$FDR)
+```
+
+### supp - heatmap
+```{r}
+# 49 potential ZEB regulators
+correlation_fil <- correlation_table[correlation_table$gene %in% ZEB2_TFs,]
+correlation_fil$sample <- paste0(stri_replace_all_regex(correlation_fil$region, 
+                                                          pattern = c("Forebrain","CerebellumPons","Medulla"), 
+                                                          replacement = c("FB","CP","MD"), vectorise_all = FALSE), 
+                                   "_",correlation_fil$age)
+correlation_FDR <- pivot_wider(correlation_fil[,c("gene","sample","FDR")], names_from = sample, values_from = FDR) %>% column_to_rownames(var = "gene")
+correlation_coefficient <- pivot_wider(correlation_fil[,c("gene","sample","coefficient")], names_from = sample, values_from = coefficient)  %>% column_to_rownames(var = "gene")
+correlation_FDR <- na.omit(correlation_FDR)
+correlation_coefficient <- na.omit(correlation_coefficient)
+
+# significance
+correlation_sig <- ifelse(correlation_FDR < 0.01, "*", "")
+
+# for later comparison
+correlation_ZEB2 <- correlation_fil
+correlation_ZEB2$sig <- ifelse(correlation_fil$FDR < 0.01, "*", "")
+save(correlation_ZEB2, file = "./data_rda/Script6/correlation_ZEB2.rda")
+```
+
+```{r}
+# group by region
+columnsplit <- stri_replace_all_regex(sub("_.*","",names(correlation_coefficient)), vectorise_all = FALSE,
+                                      pattern = c("FB","CP","MD"), replacement = c("Forebrain","CerebellumPons","Medulla"))
+columnsplit <- factor(columnsplit, levels = c("Forebrain", "CerebellumPons", "Medulla"))
+
+# heatmap
+correlation_coefficient <- correlation_coefficient[heatmap_order,]
+correlation_sig <- correlation_sig[heatmap_order,]
+p <- ComplexHeatmap::Heatmap(as.matrix(correlation_coefficient), cluster_rows = FALSE, cluster_columns = FALSE, 
+                             column_split= columnsplit, col = c("blue","white","#EE2211"),
+                             heatmap_legend_param = list(legend_direction = "horizontal", legend_side = "right"), 
+                             name = "correlation: chromVAR ~ ZEB2 gene score", column_names_rot = 90,
+                             cell_fun = function(j, i, x, y, width, height, fill) {
+                               grid::grid.text(correlation_sig[i, j], x = x, y = y-unit(1, "mm"), gp = grid::gpar(fontsize = 15))})
+draw(p, heatmap_legend_side = "bottom")
+```
+
+```{r}
+## why does CS16_MD show strong signal? (already downsampled, so nCell isn't the driving factor)
+
+# check cell number: does it have obvious effect on statistical power? 
+# - MD-16 has the largest RG population, but so does FB-16...
+table(RG_geneScore$ID)
+
+# ZEB2 gene score distribution - low gene score and low variation -> noise
+ZEB2_explore <- as.data.frame(t(ZEB2_GS))
+sum(rownames(ZEB2_explore) == ArchR_EHB_RG$cellNames) == nrow(ZEB2_explore)
+
+ZEB2_explore$age <- ArchR_EHB_RG$Age
+ZEB2_explore$ID <- ArchR_EHB_RG$ID
+
+ggplot(ZEB2_explore, aes(x=ZEB2,y=ID, fill=age)) +
+  geom_violin() + BuenColors::pretty_plot() +
+  scale_fill_manual(values = c(CS14="#704D9E", CS16="#BC5AA9", CS17="#ED7C97", CS20="#f79452", CS21="#f2de5c")) +
+  theme(legend.position = "bottom") + ylab("") + xlab("ZEB2 gene score")
+```
+
+
+## (6) overlap
+```{r}
+load("./data_rda/Script6/correlation_self.rda")
+load("./data_rda/Script6/correlation_ZEB2.rda")
+
+# self >> genes that are ACTIVE (positive correlation between its own GS and chromVAR)
+correlation_self$correlation <- ""
+correlation_self$correlation[correlation_self$sig=="*" & correlation_self$coefficient > 0] <- "positive"
+correlation_self$correlation[correlation_self$sig=="*" & correlation_self$coefficient < 0] <- "negative"
+table1 <- correlation_self[,c("age","region","gene","sample","coefficient","FDR","sig","correlation")]
+names(table1)[5:8] <- paste0("self","_",names(table1)[5:8])
+
+# ~ ZEB2 >> genes that may target ZEB2 (positive/negative correlation between its own chromVAR and ZEB2 GS)
+correlation_ZEB2$correlation <- ""
+correlation_ZEB2$correlation[correlation_ZEB2$sig=="*" & correlation_ZEB2$coefficient > 0] <- "positive"
+correlation_ZEB2$correlation[correlation_ZEB2$sig=="*" & correlation_ZEB2$coefficient < 0] <- "negative"
+table2 <- correlation_ZEB2[,c("age","region","gene","sample","coefficient","FDR","sig","correlation")]
+names(table2)[5:8] <- paste0("ZEB2","_",names(table2)[5:8])
+
+# merge
+table_cor <- merge(table1, table2, by = c("age","region","gene","sample"))
+table_cor_fil <- table_cor[table_cor$self_correlation=="positive" & table_cor$ZEB2_sig=="*",]$gene
+#table_cor_fil <- table_cor[table_cor$self_correlation=="positive",]$gene
+table_cor_fil <- table_cor[table_cor$gene %in% table_cor_fil,]
+table_cor_fil$ZEB2_correlation[table_cor_fil$ZEB2_correlation==""] <- "non-significant"
+table_cor_fil$region <- stri_replace_all_regex(table_cor_fil$region, pattern = c("Forebrain","CerebellumPons","Medulla"),
+                                               replacement = c("FB","CP","MD"), vectorize_all = FALSE)
+table_cor_fil$region <- factor(table_cor_fil$region, levels = c("FB","CP","MD"))
+
+save(table_cor_fil, file = "./data_rda/Script6/correlation_merge.rda")
+```
+
+```{r}
+ggplot(table_cor_fil, aes(x=sample, y=gene, fill=ZEB2_coefficient, shape=ZEB2_correlation, size=self_coefficient)) +
+  geom_point() + xlab("") + ylab("") + BuenColors::pretty_plot() + facet_wrap(~region, scales = "free_x") +
+  scale_fill_gradient2(low = "blue", mid = "white",  high = "red", midpoint = 0, guide = guide_colorbar(barheight = 0.5)) +
+  scale_shape_manual(values = c("negative"=23, "positive"=21, "non-significant"=13)) +
+  theme(legend.position = "bottom", axis.text.x = element_text(angle = 45, hjust=1))
+```
+
+### main fig - heatmaps
+```{r}
+ggplot(table_cor_fil, aes(x=age, y=gene, fill=ZEB2_coefficient)) +
+  geom_tile() + xlab("") + ylab("") + BuenColors::pretty_plot() + facet_wrap(~region, ncol=3) +
+  scale_fill_gradientn(colors = c("purple", "white", "orange"), name = "correlation",
+                       values = scales::rescale(c(min(table_cor_fil$ZEB2_coefficient), 0, max(table_cor_fil$ZEB2_coefficient)))) +
+  theme(axis.text.x = element_text(angle=45,hjust=1,size=8), legend.position = "right",
+        axis.text.y = element_text(size=8), plot.title = element_text(size=10)) +
+  geom_text(aes(label = ZEB2_sig), size = 5, color = "black",nudge_y=-0.2) +
+  ggtitle("Potential upstream TF chromVAR ~ ZEB2 gene score") +
+  scale_y_discrete(limits = rev(unique(table_cor_fil$gene)))
+```
+
+```{r}
+ggplot(table_cor_fil, aes(x=age, y=gene, fill=self_coefficient)) +
+  geom_tile() + xlab("") + ylab("") + BuenColors::pretty_plot() + facet_wrap(~region, ncol=3) +
+  scale_fill_gradientn(colors = c("blue", "white", "#EE2211"), name = "correlation") +
+  theme(axis.text.x = element_text(angle=45,hjust=1,size=8), legend.position = "right",
+        axis.text.y = element_text(size=8), plot.title = element_text(size=10)) +
+  geom_text(aes(label = self_sig), size = 5, color = "black",nudge_y=-0.2) +
+  ggtitle("Potential upstream TF chromVAR ~ TF gene score") +
+  scale_y_discrete(limits = rev(unique(table_cor_fil$gene)))
+```
+
+
+# 2. Enhancers (DNA)
+## (1) import enhancer locations
+Bar Yaacov 2019: https://academic.oup.com/hmg/article/28/9/1487/5261438
+```{r}
+# import enhancer locations - hg19
+library(readxl)
+ZEB2_enhancers <- read_excel("./data_input/ZEB2_mechanism/ddy440_hmg_table_s1.xlsx", sheet = "Table S1 ", col_names = TRUE)
+names(ZEB2_enhancers) <- ZEB2_enhancers[2,]
+ZEB2_enhancers <- ZEB2_enhancers[3:20,]
+ZEB2_enhancers$assay <- c("negative", rep("positive",6), rep("negative",4), rep("positive",3), rep("negative",4))
+names(ZEB2_enhancers)[3] <- "Chr"
+
+# convert from hg19 to hg38
+library(rtracklayer)
+# download from http://hgdownload.cse.ucsc.edu/goldenpath/hg19/liftOver/hg19ToHg38.over.chain.gz
+chain <- import.chain("./data_input/ZEB2_mechanism/hg19ToHg38.over.chain")
+enhancers_hg19 <- GRanges(seqnames = ZEB2_enhancers$Chr, ranges = IRanges(start = as.numeric(ZEB2_enhancers$Start), end = as.numeric(ZEB2_enhancers$End)), strand = "+")
+enhancers_hg38 <- liftOver(enhancers_hg19, chain)
+enhancers_hg38 <- unlist(enhancers_hg38)
+rm(chain)
+
+# new enhancer locations
+ZEB2_enhancers <- ZEB2_enhancers[,c(1,13,2,3:7)]
+ZEB2_enhancers$Start <- enhancers_hg38@ranges@start
+ZEB2_enhancers$End <- enhancers_hg38@ranges@start + enhancers_hg38@ranges@width - 1
+ZEB2_enhancers$`Base pairs` <- enhancers_hg38@ranges@width
+rm(enhancers_hg19, enhancers_hg38)
+```
+
+
+## (2) get ZEB2 TAD from Hi-C
+
+Won 2016: https://www.nature.com/articles/nature19847
+  Hi-C data for developmental human brain
+  samples were from three individuals at gestation week (GW) 17–18
+  CP = cortical and subcortical plate (primarily post-mitotic neurons)
+  GZ = the germinal zone (primarily mitotically active neural progenitors)
+
+ZEB2 gene body (reverse strand) -- chr2:144,364,364–144,521,057 (hg38)
+
+```{r}
+# ZEB2 reglatory regions (TSS ±500 kb)
+library(GenomicRanges)
+ZEB2_TSS <- 144521057
+ZEB2_reg_region <- GRanges(seqnames = "chr2", ranges = IRanges(start = ZEB2_TSS - 500000, end = ZEB2_TSS + 500000), gene = "ZEB2")
+
+# Hi-C data
+HiC_GZ <- read.table("./data_input/ZEB2_mechanism/GSE77565_GZ_TAD.bed", header=FALSE)
+HiC_GZ <- GRanges(seqnames = HiC_GZ$V1, ranges = IRanges(start = HiC_GZ$V2, end = HiC_GZ$V3))
+HiC_CP <- read.table("./data_input/ZEB2_mechanism/GSE77565_CP_TAD.bed", header=FALSE)
+HiC_CP <- GRanges(seqnames = HiC_CP$V1, ranges = IRanges(start = HiC_CP$V2, end = HiC_CP$V3))
+
+# find overlaps
+hits <- findOverlaps(HiC_GZ, ZEB2_reg_region)
+TAD_overlap_GZ <- HiC_GZ[queryHits(hits)]
+hits <- findOverlaps(HiC_CP, ZEB2_reg_region)
+TAD_overlap_CP <- HiC_CP[queryHits(hits)]
+
+# GZ and CP regions have the same ZEB2 regulatory TAD - chr2:143760000-145280000
+TAD_overlap_GZ == TAD_overlap_CP
+
+rm(HiC_GZ, HiC_CP, hits)
+```
+
+
+## (3) active enhancers
+
+Filtering enhancers that are in ZEB2 TAD & accessible peaks
+ATAC peaks in ArchR are *fixed-width (500 bp)*, centered around the position with peak ATAC signal
+
+```{r}
+# ZEB2 enhancers are longer than ATAC peaks
+summary(ZEB2_enhancers$End - ZEB2_enhancers$Start)
+```
+
+```{r}
+# find region marker peaks ~ 1 min
+markersPeaks_rg <- getMarkerFeatures(ArchR_EHB_RG, useMatrix = "PeakMatrix", groupBy = "Region", 
+                                     bias = c("TSSEnrichment", "log10(nFrags)"), testMethod = "wilcoxon", k = 100, maxCells = 5000)
+save(markersPeaks_rg, file = "./data_rda/Script6/markersPeaks_rg.rda")
+```
+
+```{r}
+load("./data_rda/Script6/markersPeaks_rg.rda")
+
+# get all ATAC peaks in ZEB2 regulatory region
+markersPeaks_all <- getMarkers(markersPeaks_rg, cutOff = "FDR > -1")
+peaks <- markersPeaks_all[["Forebrain"]]
+peaks <- peaks[peaks$seqnames=="chr2",]
+ZEB2_peaks_all <- peaks[peaks$start>= ZEB2_TSS - 500000 & peaks$end <= ZEB2_TSS + 500000,]
+ZEB2_peaks_all <- GRanges(seqnames = ZEB2_peaks_all$seqnames, 
+                          ranges = IRanges(start = ZEB2_peaks_all$start, end = ZEB2_peaks_all$end))
+save(ZEB2_peaks_all, file = "./data_rda/Script6/ZEB2_peaks_all.rda")
+```
+
+```{r}
+# This proves that getMarkerFeatures() and getMarkers() still retains all accessible peaks
+PeakMatrix <- getMatrixFromProject(ArchR_EHB_RG, useMatrix = "PeakMatrix", excludeChr = paste0("chr", c(1,3:22, "M", "X", "Y")))
+nrow(peaks) == nrow(PeakMatrix) # 41289 peaks
+rm(PeakMatrix)
+```
+
+```{r}
+# get ATAC peaks in ZEB2 regulatory region - brain region-specific
+markersPeaks_region <- getMarkers(markersPeaks_rg, cutOff = "FDR <= 0.01 & Log2FC >= 0.6")
+ZEB2_peaks_region <- list()
+for (x in names(markersPeaks_region)){
+  peaks <- markersPeaks_region[[x]]
+  peaks <- peaks[peaks$seqnames=="chr2",]
+  ZEB2_peaks_region[[x]] <- peaks[peaks$start>= ZEB2_TSS - 500000 & peaks$end <= ZEB2_TSS + 500000,]
+  rm(x, peaks)
+}
+save(ZEB2_peaks_region, file = "./data_rda/Script6/ZEB2_peaks_region.rda")
+
+rm(markersPeaks_rg, markersPeaks_region, markersPeaks_all, peaks)
+```
+
+```{r}
+# exclude peaks with weak regional signal
+weakPeaks_region <- getMarkers(markersPeaks_rg, cutOff = "FDR <= 0.01 & Log2FC <= -0.6")
+ZEB2_peaks_strong <- list()
+for (x in names(weakPeaks_region)){
+  peaks <- weakPeaks_region[[x]]
+  peaks <- peaks[peaks$seqnames=="chr2",]
+  weakPeaks <- peaks[peaks$start>= ZEB2_TSS - 500000 & peaks$end <= ZEB2_TSS + 500000,]
+  weakPeaks <- GRanges(seqnames = weakPeaks$seqnames, ranges = IRanges(start = weakPeaks$start, end = weakPeaks$end))
+  hits <- findOverlaps(ZEB2_peaks_all, weakPeaks)
+  ZEB2_peaks_strong[[x]] <- ZEB2_peaks_all[-queryHits(hits)]
+  
+  rm(x, peaks, weakPeaks, hits)
+}
+save(ZEB2_peaks_strong, file = "./data_rda/Script6/ZEB2_peaks_strong.rda")
+```
+
+```{r}
+# active enhancers by region
+ZEB2_enhancer_in_peak <- list()
+for (x in names(ZEB2_peaks_strong)){
+  ZEB2_peaks_loc <- ZEB2_peaks_strong[[x]]
+  ZEB2_enhancers_loc <- GRanges(seqnames = ZEB2_enhancers$Chr, 
+                                ranges = IRanges(start = ZEB2_enhancers$Start, end = ZEB2_enhancers$End), 
+                                name = ZEB2_enhancers$Name)
+  
+  # find overlaps
+  hits <- findOverlaps(ZEB2_enhancers_loc, ZEB2_peaks_loc)
+  ZEB2_enhancer_in_peak[[x]] <- ZEB2_enhancers_loc[queryHits(hits)]
+  ZEB2_enhancer_in_peak[[x]] <- unique(ZEB2_enhancer_in_peak[[x]])
+  rm(x, hits, ZEB2_peaks_loc, ZEB2_enhancers_loc)  
+}
+save(ZEB2_enhancer_in_peak, file = "./data_rda/Script6/ZEB2_enhancer_in_peak.rda")
+```
+
+
+### main/supp fig - track plots
+```{r}
+# exclude low-coverage (noisy) samples
+# - excluding CP-16 and MD-21, with ncell < 200
+# - set minCells = 200 in plotBrowserTrack()
+table(ArchR_EHB_RG$ID)
+
+# plot browser tracks by region ~ 1 min
+set.seed(100)
+p <- list()
+peak_coAccess <- list()
+for (x in names(ZEB2_enhancer_in_peak)){
+  print(x)
+  
+  print("excluding samples with low cell count")
+  
+  
+  print("calculating co-accessibility")
+  ArchR_fil <- ArchR_EHB_RG[ArchR_EHB_RG$ID %ni% c("CP-16","MD-21"),]
+  ArchR_fil <- ArchR_fil[ArchR_fil$Region==x,]
+  ArchR_fil <- addCoAccessibility(ArchR_fil, reducedDims = "IterativeLSI", excludeChr = paste0("chr", c(1,3:22, "M", "X", "Y")))
+  peak_coAccess[[x]] <- ArchR_fil@peakSet@metadata[["CoAccessibility"]]
+  
+  print("plotting browswer track")
+  p[[x]] <- plotBrowserTrack(ArchR_fil, groupBy = "Age", geneSymbol = "ZEB2",
+                             upstream = 500000, downstream = 500000, maxCells = 2000, minCells = 200,
+                             plotSummary = c("bulkTrack", "featureTrack", "loopTrack", "geneTrack"), sizes = c(8, 1, 2, 3),
+                             features = ZEB2_enhancer_in_peak[[x]],
+                             pal = c(CS14="#704D9E", CS16="#BC5AA9", CS17="#ED7C97", CS20="#f79452", CS21="#f2de5c"))
+  rm(x, ArchR_fil)
+  gc()
+}
+```
+
+```{r}
+pdf("./ArchR_EHB/Plots/Script6/ATAC_browser_track.pdf", width = 6, height = 5)
+
+grid::grid.newpage()
+grid::grid.draw(p[[1]]$ZEB2)
+
+grid::grid.newpage()
+grid::grid.draw(p[[2]]$ZEB2)
+
+grid::grid.newpage()
+grid::grid.draw(p[[3]]$ZEB2)
+
+dev.off()
+
+names(p)
+```
+
+
+### fig - coAccess peak heatmaps
+```{r}
+# get co-accessibility by region
+p <- list()
+peak_coAccess_in_ZEB2 <- list()
+for (x in c("Forebrain","CerebellumPons","Medulla")){
+  # get the correct peak info using peak ID (queryHits)
+  peaks <- cbind("peak" = 1:nrow(data.frame(peak_coAccess[[x]]@metadata$peakSet@ranges)), 
+                 "chr" = peak_coAccess[[x]]@metadata$peakSet@seqnames,
+                 as.data.frame(peak_coAccess[[x]]@metadata$peakSet@ranges))
+  
+  # peaks in the ZEB2 regulatory region
+  peaks <- peaks[peaks$chr=="chr2",]
+  peaks <- peaks[peaks$start>= ZEB2_TSS - 500000 & peaks$end <= ZEB2_TSS + 500000,]
+  coAccess <- peak_coAccess[[x]][peak_coAccess[[x]]$seqnames=="chr2",]
+  coAccess <- coAccess[coAccess$queryHits %in% peaks$peak & coAccess$subjectHits %in% peaks$peak,]
+  peak_coAccess_in_ZEB2[[x]] <- peaks[peaks$peak %in% coAccess,]
+  
+  # add ZEB2 TSS position label
+  label_start <- peaks$peak[peaks$start <= ZEB2_TSS & peaks$end >= ZEB2_TSS]
+  
+  # co-accessibility heatmap
+  p[[x]] <- ggplot(coAccess, aes(x=queryHits, y=subjectHits, fill=correlation)) + 
+    geom_tile() + 
+    scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0) +
+    theme_minimal() + labs(x = "query peaks", y = "subject peaks") +
+    xlab("chr2:144067384-145015649") + ylab("") + ggtitle(x) + BuenColors::pretty_plot() + 
+    scale_x_continuous(breaks = c(label_start), labels = c("TSS")) +
+    scale_y_continuous(breaks = c(label_start), labels = c("TSS"))
+  
+  rm(x, peaks, coAccess, label_start)
+}
+
+wrap_plots(p)
+
+rm(peak_coAccess)
+gc()
+```
+
+
+## (4) overlap with upstream TF motifs
+```{r}
+load("./data_rda/Script6/ZEB2_peaks_strong.rda")
+load("./data_rda/Script6/ZEB2_enhancer_in_peak.rda")
+load("./data_rda/Script6/motifPositions_hits_in_ZEB2.rda")
+```
+
+```{r}
+# overlap
+functional_overlap <- list()
+functional_overlap_summary <- data.frame()
+for (x in names(motifPositions_hits_in_ZEB2)){
+  functional_overlap[[x]] <- GRanges()
+  # find overlaps: TF <> rg-spc validated enhancer (independent experiment)
+  for (y in names(ZEB2_enhancer_in_peak)){
+    hits <- findOverlaps(ZEB2_enhancer_in_peak[[y]], motifPositions_hits_in_ZEB2[[x]])
+    overlap <- unique(ZEB2_enhancer_in_peak[[y]][queryHits(hits)])
+    if (length(overlap) > 0){
+      overlap$region <- y
+      functional_overlap[[x]] <- c(functional_overlap[[x]], overlap)
+    }
+    functional_overlap_summary <- rbind(functional_overlap_summary, c(x, y, length(overlap)))
+  }
+  rm(x, hits, y, overlap) 
+}
+names(functional_overlap_summary) <- c("TF","Region","Overlap_enhancers")
+functional_overlap_summary$Overlap_enhancers <- as.numeric(functional_overlap_summary$Overlap_enhancers)
+```
+
+
+### supp fig - enhancer counts per TF
+```{r}
+df <- functional_overlap_summary
+df$Overlap_enhancers[df$Overlap_enhancers==0] <- NA
+df <- na.omit(df)
+df$Region <- factor(df$Region, levels = rev(c("Forebrain", "CerebellumPons", "Medulla")))
+
+ggplot(df, aes(x=TF,y=Region,colour=Overlap_enhancers,size=Overlap_enhancers)) +
+  geom_point() + BuenColors::pretty_plot() +
+  xlab("") + ylab("") +
+  scale_size(range = c(2, 5), breaks = c(1, 3, 5, 7, 9)) +
+  scale_colour_gradientn(colors = RColorBrewer::brewer.pal(9, "YlOrRd")[3:9], breaks = c(1, 3, 5, 7, 9)) +
+  guides(colour = guide_legend(order = 1), size = guide_legend(order = 1)) +
+  labs(colour = "count",size = "count") + ggtitle("TF motifs overlapping with predicted ZEB2 enhancers") +
+  theme(axis.text.x = element_text(angle=45,hjust=1,size=9),
+        axis.text.y = element_text(size=10))
+```
+
+### supp table - enhancers
+```{r}
+# predicted peaks that could contain ZEB2 enhancers
+ZEB2_peaks <- data.frame()
+for (x in names(ZEB2_peaks_strong)){
+  df <- as.data.frame(ZEB2_peaks_strong[[x]])
+  df <- df[, names(df) != "idx"]
+  df$region <- x
+  ZEB2_peaks <- rbind(ZEB2_peaks, df)
+  rm(x)
+}
+row.names(ZEB2_peaks) <- NULL
+
+# active enhancers supported by Bar Yaacov 2019
+ZEB2_enhancers <- data.frame()
+for (x in names(ZEB2_enhancer_in_peak)){
+  df <- as.data.frame(ZEB2_enhancer_in_peak[[x]])
+  if (nrow(df) != 0){
+    df$region <- x
+    ZEB2_enhancers <- rbind(ZEB2_enhancers, df)
+    ZEB2_enhancers <- distinct(ZEB2_enhancers)
+  }
+  rm(x)
+}
+
+# overlap: TF motif <> enhancers supported by Bar Yaacov 2019
+ZEB2_overlap <- data.frame()
+for (x in names(functional_overlap)){
+  df <- as.data.frame(functional_overlap[[x]])
+  if (nrow(df) != 0){
+    df$TF <- x
+    ZEB2_overlap <- rbind(ZEB2_overlap, df)
+    ZEB2_overlap <- distinct(ZEB2_overlap)
+  }
+  rm(x)
+}
+
+# save tables
+writexl::write_xlsx(list("Accessible Peaks" = ZEB2_peaks, 
+                         "Validated Enhancers in Peaks" = ZEB2_enhancers, 
+                         "Validated Enhancers - TF motifs" = ZEB2_overlap), 
+                    path = "./data_output/Script5_ZEB2/ZEB2_predicted_enhancers.xlsx")
+```
+
+
+
+
+# 3. ZEB2 motif
+## (1) ZEB2 footprinting
+ZEB2 is not in ArchR motif list: CIS-BP database https://cisbp.ccbr.utoronto.ca/index.php
+```{r}
+# ZEB2 motif binding info: http://homer.ucsd.edu/homer/motif/HomerMotifDB/homerResults/motif403.motif
+ZEB2_motif <- read.delim("./data_input/ZEB2_mechanism/ZEB2_motif.txt", header=FALSE, skip = 1)
+names(ZEB2_motif) <- c("A","C","G","T")
+
+# modify values to make sure row-sums = 1
+ZEB2_motif[rowSums(ZEB2_motif) != 1,]
+ZEB2_motif[1,3] <- ZEB2_motif[1,3] - 0.001
+ZEB2_motif[3,1] <- ZEB2_motif[3,1] + 0.001
+rowSums(ZEB2_motif)
+
+# create a custom PWM list
+myPWM <- getPeakAnnotation(ArchR_EHB_RG, "Motif")$motifs
+myPWM@listData <- myPWM@listData[1]
+names(myPWM@listData) <- "ZEB2"
+myPWM@listData[["ZEB2"]]@profileMatrix <- as.matrix(t(ZEB2_motif))
+
+# add motif annotation to ArchR object
+ArchR_EHB_RG <- addMotifAnnotations(ArchR_EHB_RG, motifPWMs = myPWM, annoName = "Motif-ZEB2", force = TRUE)
+save(ArchR_EHB_RG, file = "./data_rda/Script6/ArchR_EHB_RG.rda")
+rm(ZEB2_motif, myPWM)
+```
+
+### main fig - by region
+```{r}
+source("./R_functions/Script3_FootprintPlot.R")
+
+# get positions
+motifPositions <- getPositions(ArchR_EHB_RG, name="Motif-ZEB2")
+seFoot <- getFootprints(ArchR_EHB_RG, positions = motifPositions, groupBy = "Region")
+
+# plot footprints for top TFs
+p <- FootprintPlot(seFoot, name = "ZEB2", normMethod = "Subtract", smoothWindow = 5, 
+                          pal = c(Forebrain="#FDE333", CerebellumPons="#53CC67", Medulla="#009B95"))
+p <- p + theme(plot.margin = unit(c(0, 0, 0, 0), "cm")) 
+
+rm(seFoot, motifPositions)
+```
+
+```{r, fig.width= 8.5, fig.height=4}
+p + theme(
+  axis.text = element_text(size = 22),
+  axis.title = element_text(size = 22),
+  plot.title = element_text(size=22)
+)
+```
+
+
+```{r}
+plotFootprints(seFoot, ArchRProj = ArchR_EHB_RG, normMethod = "Subtract", plotName = "Script6/TF-Footprints_ZEB2_rg", 
+               addDOC = FALSE, smoothWindow = 5, pal = c("#009B95","#FDE333", "#53CC67"), baseSize = 8,
+               height = 5, width = 4)
+```
+
+
+### supp fig - by  sample
+```{r}
+# get positions
+motifPositions <- getPositions(ArchR_EHB_RG, name="Motif-ZEB2")
+
+# plot by age
+seFoot <- getFootprints(ArchR_EHB_RG, positions = motifPositions, groupBy = "Age")
+plotFootprints(seFoot, ArchRProj = ArchR_EHB_RG, normMethod = "Subtract", plotName = "Script6/TF-Footprints_ZEB2_age", 
+               addDOC = FALSE, smoothWindow = 5, baseSize = 8)
+
+# plot by sample
+seFoot <- getFootprints(ArchR_EHB_RG, positions = motifPositions, groupBy = "Sample")
+plotFootprints(seFoot, ArchRProj = ArchR_EHB_RG, normMethod = "Subtract", plotName = "Script6/TF-Footprints_ZEB2_sp", 
+               addDOC = FALSE, smoothWindow = 5, baseSize = 8)
+
+rm(seFoot, motifPositions)
+```
+
+
+## (2) single gene footprints
+-> hopefully the ZEB2 footprint is cleaner for single genes (prediected to be ZEB2 targets in existing studies)
+
+### import predicted targets
+- 81/83 interactor proteins (BioGRID human) - both physical and genetic interactions!
+- 107/108 target genes (Birkhoff 2023 mouse)
+- 12/12 pathway genes (Benito-Kwiecinski 2021 human)
+```{r}
+# interactor proteins (BioGRID human)
+genes <- read.csv("./data_input/ZEB2_mechanism/BioGRID_ZEB2_interactors.csv")
+genes <- genes$Interactor
+predicted_target <- list()
+predicted_target[["interactor_human"]] <- genes
+
+# pathway genes (Benito-Kwiecinski 2021 human)
+genes <- c("SHROOM3", paste0("SMAD",c(1:7,9)), "OCLN", "CDH1", "CDH2")
+predicted_target[["pathway_human"]] <- genes
+
+# target genes (Birkhoff 2023 mouse)
+library(org.Hs.eg.db)
+library(org.Mm.eg.db)
+library(Orthology.eg.db)
+mapIt <- function(mouseids, horg, morg, orth){
+    mouseg <- mapIds(morg, mouseids, "ENTREZID", "SYMBOL")
+    mapped <- select(orth, mouseg, "Homo_sapiens","Mus_musculus")
+    names(mapped) <- c("Mus_egid","Homo_egid")
+    husymb <- select(horg, as.character(mapped[,2]), "SYMBOL","ENTREZID")
+    return(data.frame(Mus_symbol = mouseids, mapped, Homo_symbol = husymb[,2]))
+}
+genes <- readxl::read_excel("./data_input/ZEB2_mechanism/Birkhoff_et al_2021_Supplementary File 3.xlsx")
+genes <- mapIt(genes$symbol, org.Hs.eg.db, org.Mm.eg.db, Orthology.eg.db)
+genes <- as.vector(na.omit(genes$Homo_symbol))
+predicted_target[["target_mouse"]] <- genes
+
+save(predicted_target, file = "./data_rda/Script6/predicted_target.rda")
+rm(mapIt, genes)
+```
+
+
+### TF footprint: all target genes combined
+```{r}
+# get gene regulatory regions: gene start (TSS) ± 500 kb
+load("./data_rda/Script6/predicted_target.rda")
+target_genes <- unique(unlist(predicted_target))
+target_genes_GRanges <- ArchR_EHB_RG@geneAnnotation@listData[["genes"]][ArchR_EHB_RG@geneAnnotation@listData[["genes"]]$symbol
+                                                                        %in% target_genes,]
+start(target_genes_GRanges) <- pmax(start(target_genes_GRanges) - 500000, 1)
+end(target_genes_GRanges) <- start(target_genes_GRanges) + 1000000
+end(target_genes_GRanges) <- pmin(end(target_genes_GRanges),  # make sure the end position < chr length
+                                  seqlengths(target_genes_GRanges)[as.character(seqnames(target_genes_GRanges))])
+target_genes_GRanges@ranges@width
+```
+
+```{r}
+# find ZEB2 binding motifs in target gene regulatory regions
+motifPositions <- getPositions(ArchR_EHB_RG, name="Motif-ZEB2")
+hits <- findOverlaps(motifPositions$ZEB2, target_genes_GRanges)
+motifPositions_hits <- motifPositions$ZEB2[queryHits(hits)]
+motifPositions_hits <- GRangesList(motifPositions_hits)
+names(motifPositions_hits) <- "ZEB2 motifs for all target genes"
+
+# footprinting for all genes ~ 0.7 min
+seFoot <- getFootprints(ArchR_EHB_RG, positions = motifPositions_hits, groupBy = "Region")
+plotFootprints(seFoot, ArchRProj = ArchR_EHB_RG, normMethod = "Subtract", plotName = "Script6/TF-Footprints_ZEB2_target_gene_all2", 
+               addDOC = FALSE, smoothWindow = 5, baseSize = 8, pal = c("#009B95","#FDE333", "#53CC67"))
+```
+
+
+### TF footprints by gene
+```{r}
+# split genes
+target_genes_list <- GRangesList(lapply(seq_along(target_genes_GRanges), function(i) target_genes_GRanges[i]))
+names(target_genes_list) <- as.vector(target_genes_GRanges$symbol)
+length(target_genes_list) # 192 genes
+
+# find ZEB2 binding motifs in target gene regulatory regions
+motifPositions <- getPositions(ArchR_EHB_RG, name="Motif-ZEB2")
+motifPositions_hits_list <- GRangesList()
+for (x in names(target_genes_list)){
+  hits <- findOverlaps(motifPositions$ZEB2, target_genes_list[[x]])  
+  motifPositions_hits_list[[paste0("ZEB2 motifs for ", x)]] <- motifPositions$ZEB2[queryHits(hits)]
+  rm(x)
+}
+
+# look at ZEB2 motif hits per gene, filter out genes with 0 hit
+hit_summary <- data.frame()
+for (x in 1:length(motifPositions_hits_list)){
+  hit_summary <- rbind(hit_summary, c(x, names(motifPositions_hits_list)[x], length(motifPositions_hits_list[[x]])))
+  rm(x)
+}
+names(hit_summary) <- c("number","gene","hit_count")
+hit_summary$hit_count <- as.numeric(hit_summary$hit_count)
+motifPositions_hits_list <- motifPositions_hits_list[hit_summary$gene[hit_summary$hit_count > 0]]
+length(motifPositions_hits_list) # 188 genes
+```
+
+```{r}
+# get footprints ~ 40s
+seFoot <- getFootprints(ArchR_EHB_RG, positions = motifPositions_hits_list, groupBy = "Region")
+
+# Tn5 insertion signal must not have too many 0s
+summary_Tn5 <- data.frame()
+for (x in names(seFoot@assays@data@listData)){
+  summary_Tn5 <- rbind(summary_Tn5, c(x, sum(rowMeans(seFoot@assays@data@listData[[x]])==0)))
+  rm(x)
+}
+names(summary_Tn5) <- c("gene", "count")
+summary_Tn5$count <- as.numeric(summary_Tn5$count)
+
+select <- summary_Tn5$gene[summary_Tn5$count <= 80]
+select <- select[select %ni% paste0("ZEB2 motifs for ",c("RPA3","FOXO1","GAS7"))]
+length(select) # 149 genes
+```
+
+```{r}
+# load modified functions
+source("./R_functions/Script3_FootprintPlot.R")
+
+# plot footprints
+p <- list()
+for (x in select){
+  print(x)
+  p[[x]] <- FootprintPlot(seFoot, name = x, normMethod = "Subtract", smoothWindow = 20, 
+                          pal = c(Forebrain="#FDE333", CerebellumPons="#53CC67", Medulla="#009B95"))
+  rm(x)
+}
+
+# 1 min
+save(p, file = "./data_rda/Script6/Footprint_plot_by_gene.rda")
+```
+
+
+
+# 4. Downstream
+## (1) GS-GS correlation
+```{r}
+load("./data_rda/Script5/gene_score_matrix_RG.rda")
+load("./data_rda/Script6/predicted_target.rda")
+target_genes <- unique(unlist(predicted_target))
+
+# gene score
+gene_score_matrix_fil <- gene_score_matrix[na.omit(match(target_genes, rownames(gene_score_matrix))),]
+gene_score_matrix_fil <- assay(gene_score_matrix_fil)
+sum(colnames(gene_score_matrix_fil) == ArchR_EHB_RG$cellNames) == length(ArchR_EHB_RG$cellNames)
+rm(gene_score_matrix)
+gc()
+```
+
+```{r}
+# skip down-sample: 
+# - 1000 cells: just 3 negative genes
+# - 150 cells: worse, lose many significant signals
+table(ArchR_EHB_RG$ID)
+
+# Spearman's correlation: by age and region
+set.seed(100)
+correlation_table_predicted <- list()
+for (x in unique(ArchR_EHB_RG$ID)){
+  
+  fil <- gene_score_matrix_fil[,ArchR_EHB_RG$ID==x] 
+  #downsample <- sample(colnames(fil), min(1000,ncol(fil)), replace = FALSE) # downsample to n=1000
+  #fil <- fil[,downsample]
+  
+  for (y in rownames(gene_score_matrix_fil)){
+    out <- cor.test(fil["ZEB2",], fil[y,],method = "spearman")
+    out <- data.frame(p_value = out$p.value, coefficient = out$estimate)  # coefficient = Spearman's rho
+    correlation_table_predicted[[x]] <- rbind(correlation_table_predicted[[x]], out)
+  }
+  rownames(correlation_table_predicted[[x]]) <- rownames(gene_score_matrix_fil)
+  correlation_table_predicted[[x]] <- correlation_table_predicted[[x]][rownames(correlation_table_predicted[[x]]) != "ZEB2",]
+  
+  correlation_table_predicted[[x]]$FDR <- p.adjust(correlation_table_predicted[[x]]$p_value, method = "BH")
+  correlation_table_predicted[[x]]$mlog10FDR <- -log10(correlation_table_predicted[[x]]$FDR)
+  correlation_table_predicted[[x]]$gene <- rownames(correlation_table_predicted[[x]])
+  correlation_table_predicted[[x]]$sample <- x
+  
+  rm(x, y, fil, downsample)
+}
+
+# summary
+correlation_summary_curate <- do.call(rbind, correlation_table_predicted)
+rownames(correlation_summary_curate) <- NULL
+correlation_summary_curate$correlation <- "non-significant"
+correlation_summary_curate$correlation[correlation_summary_curate$FDR <= 0.01 & correlation_summary_curate$coefficient > 0] <- "positive"
+correlation_summary_curate$correlation[correlation_summary_curate$FDR <= 0.01 & correlation_summary_curate$coefficient < 0] <- "negative"
+correlation_summary_curate <- correlation_summary_curate[order(correlation_summary_curate$FDR),]
+correlation_summary_curate$region <- sub("-.*","",correlation_summary_curate$sample)
+correlation_summary_curate$age <- paste0("CS",sub(".*-","",correlation_summary_curate$sample))
+save(correlation_summary_curate, file = "./data_rda/Script6/correlation_summary_curate.rda")
+```
+
+
+### supp fig - heatmap pathway genes
+12 genes - SHROOM3, OCLN, CDH1, CDH2, SMADs
+```{r}
+load("./data_rda/Script6/correlation_summary_curate.rda")
+load("./data_rda/Script6/predicted_target.rda")
+
+fil <- correlation_summary_curate[correlation_summary_curate$gene %in% predicted_target$pathway_human,]
+fil$sig <- ifelse(fil$correlation=="non-significant", "", "*")
+
+# cluster rows
+mat <- tidyr::pivot_wider(fil[,c("sample","gene","coefficient")], names_from = sample, values_from = coefficient) %>%
+  tibble::column_to_rownames("gene") %>% as.matrix()
+row_clust <- hclust(dist(mat))
+fil <- fil %>% mutate(gene = factor(gene, levels = row_clust$labels[row_clust$order]))
+fil$region <- factor(fil$region, levels = c("FB","CP","MD"))
+
+# plotting
+ggplot(fil, aes(x=age, y=gene, fill=coefficient)) +
+  geom_tile() + xlab("") + ylab("") + BuenColors::pretty_plot() + facet_wrap(~region, ncol=3) +
+  scale_fill_gradient2(low = "#4a1491", mid = "white",  high = "#f23d68") +
+  theme(axis.text.x = element_text(angle=45,hjust=1), plot.title = element_text(size=10)) +
+  geom_text(aes(label = sig), size = 5, color = "black",nudge_y=-0.2) +
+  ggtitle("ZEB2 pathway gene score ~ ZEB2 gene score")
+```
+
+
+### main fig - heatmap negative genes
+```{r}
+fil <- correlation_summary_curate[correlation_summary_curate$gene %in% 
+                                 correlation_summary_curate$gene[correlation_summary_curate$correlation == "negative"],]
+fil$sig <- ifelse(fil$correlation=="non-significant", "", "*")
+
+# cluster rows
+mat <- tidyr::pivot_wider(fil[,c("sample","gene","coefficient")], names_from = sample, values_from = coefficient) %>%
+  tibble::column_to_rownames("gene") %>% as.matrix()
+row_clust <- hclust(dist(mat))
+fil <- fil %>% mutate(gene = factor(gene, levels = rev(row_clust$labels[row_clust$order])))
+fil$region <- factor(fil$region, levels = c("FB","CP","MD"))
+
+ggplot(fil, aes(x=age, y=gene, fill=coefficient)) +
+  geom_tile() + xlab("") + ylab("") + BuenColors::pretty_plot()  + facet_wrap(~region) +
+  scale_fill_gradient2(low = "#4a1491", mid = "white",  high = "#f23d68", midpoint = 0) +
+  theme(axis.text.x = element_text(angle=45,hjust=1), plot.title = element_text(size=10)) +
+  geom_text(aes(label = sig), size = 5, color = "black",nudge_y=-0.2) +
+  ggtitle("Potential downstream target gene score ~ ZEB2 gene score")
+```
+
+
+## (2) TF footprint by gene
+### supp fig - footprint negative genes grid
+```{r}
+load("./data_rda/Script6/Footprint_plot_by_gene.rda")
+footprint_list <- p
+
+# only 5/9 potential downstream target genes have enough coverage for accessible ZEB2 motifs
+genes_downstream <- unique(fil$gene)
+genes <- genes_downstream[genes_downstream %in% sub(".*for\\ ","",names(footprint_list))]
+footprint_list <- footprint_list[paste0("ZEB2 motifs for ", genes)]
+
+# grid formatting
+for (i in 1:length(footprint_list)) {
+  footprint_list[[i]] <- footprint_list[[i]] + theme(plot.margin = unit(c(0, 0, 0, 0), "cm"))
+  if (i %ni% seq(1, length(footprint_list), by = 2)){
+    footprint_list[[i]] <- footprint_list[[i]] + ylab("")
+  }
+  if (i %in% 1:(length(footprint_list)-2)){
+    footprint_list[[i]] <- footprint_list[[i]] + xlab("")
+  }
+}
+
+wrap_plots(footprint_list, ncol=2)
+```
+
+
+## (3) gene score trend
+### supp fig - downstream
+```{r}
+gene_scores <- gene_score_matrix_fil[rownames(gene_score_matrix_fil) %in% genes_downstream,]
+sum(colnames(gene_scores) == ArchR_EHB_RG$cellNames) == ncol(gene_scores)
+
+# gene score trend
+summary <- data.frame()
+for (x in unique(ArchR_EHB_RG$Region)){
+  for (y in unique(ArchR_EHB_RG$Age)){
+    mean <- as.data.frame(cbind(rowMeans(gene_scores[,ArchR_EHB_RG$Region==x & ArchR_EHB_RG$Age==y]), x, y))
+    mean$gene <- row.names(mean)
+    summary <- rbind(summary, mean)
+  }
+  rm(x, y, mean)
+}
+names(summary)[1:3] <- c("avg_gene_score","region","age")
+summary$avg_gene_score <- as.numeric(summary$avg_gene_score)
+
+ggplot(summary, aes(x=age,y=avg_gene_score,color=region, group=region)) + 
+  geom_point() + geom_smooth(se = FALSE, method = 'loess', formula = 'y ~ x', span = 0.8) + 
+  facet_wrap(~gene, ncol=3) + 
+  scale_color_manual(values = c(Forebrain="#FDE333", CerebellumPons="#53CC67", Medulla="#009B95")) +
+  BuenColors::pretty_plot() +
+  xlab("") + ylab("Average gene score") + 
+  ggtitle("Potential downstream targets of ZEB2") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+

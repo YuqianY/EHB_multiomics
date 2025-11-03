@@ -1,0 +1,1380 @@
+Single-cell ATAC-seq for embryonic human brain
+
+```{r}
+library(ArchR)
+addArchRGenome("hg38")
+
+library(stringi)
+library(pheatmap)
+library(batchelor)
+library(tidyr)
+library(ComplexHeatmap)
+library(circlize)
+library(dendextend)
+library(writexl)
+library(readxl)
+library(patchwork)
+library(ggh4x)
+library(dplyr)
+library(ggraph)
+```
+
+
+
+# 1. ArchR setup
+## (1) create Arrow files
+```{r}
+# set directory to input files
+inputDir <- "./raw_tsvFiles/"
+inputFiles <- list.files(inputDir, pattern = "\\.tsv\\.gz$")
+inputFiles <- paste0(inputDir, inputFiles)
+names(inputFiles) <- sub(".tsv.gz", "", inputFiles)
+names(inputFiles) <- sub(inputDir, "", names(inputFiles))
+rm(inputDir)
+inputFiles
+
+# takes ~ 4.5 hr
+ArrowFiles <- createArrowFiles(inputFiles = inputFiles, sampleNames = names(inputFiles),
+                               minTSS = 4, minFrags = 1000, # quality control
+                               excludeChr = c("chrM", "chrY"), # affects the tile matrix and genescore matrix, not the arrow files
+                               addTileMat = TRUE, # add a TileMatrix using 500-bp bins
+                               addGeneScoreMat = TRUE) # add a GeneScoreMatrix
+rm(inputFiles)
+```
+
+## (2) identify doublets
+```{r}
+# takes ~ 45 min, QualityControl folder (for adding doublet summary) must be in the working directory!
+doubScores <- addDoubletScores(ArrowFiles, k = 10, knnMethod = "UMAP", LSIMethod = 1)
+
+# save and remove data
+save(doubScores, file = "./data_rda/Script1/doubScores.rda")
+rm(doubScores)
+```
+
+## (3) create ArchR project
+```{r}
+# arrow file location
+inputDir <- "./ArrowFiles/"
+ArrowFiles <- paste0(inputDir, list.files(inputDir, pattern = "\\.arrow$"))
+rm(inputDir)
+
+# create ArchR project
+ArchR_EHB <- ArchRProject(ArrowFiles, outputDirectory = "ArchR_EHB", copyArrows = FALSE)
+rm(ArrowFiles, geneAnnoHg38, genomeAnnoHg38)
+
+# inspect ArchR project
+getAvailableMatrices(ArchR_EHB)
+unique(ArchR_EHB$Sample)
+
+# default sizes for chr1-22, X, Y
+getChromSizes(ArchR_EHB)
+
+# add metadata: EHB_10x_samples.rda
+ArchR_EHB$ID <- ArchR_EHB$Sample
+ArchR_EHB$ID <- stri_replace_all_regex(ArchR_EHB$ID, pattern=EHB_10x_samples$Name, replacement=EHB_10x_samples$ID, vectorize=FALSE)
+ArchR_EHB$Age <- ArchR_EHB$Sample
+ArchR_EHB$Age <- stri_replace_all_regex(ArchR_EHB$Age, pattern=EHB_10x_samples$Name, replacement=EHB_10x_samples$Age, vectorize=FALSE)
+ArchR_EHB$Region <- ArchR_EHB$Sample
+ArchR_EHB$Region <- stri_replace_all_regex(ArchR_EHB$Region, pattern=EHB_10x_samples$Name, replacement=EHB_10x_samples$Region, vectorize=FALSE)
+```
+
+## (4) filtering
+```{r}
+# filter: keep doublet enrichment <= 2, doublet score <= 5
+ArchR_EHB <- filterDoublets(ArchR_EHB, cutEnrich = 2, cutScore = 5, filterRatio = 15)
+
+# quality check: no outliers
+summary(ArchR_EHB$DoubletEnrichment)
+```
+
+```{r}
+# doublet plot
+doublet <- data.frame(
+  Sample = c("SINAD11", "SINAF11", "SINAE11", "SINAB9", "SINAA11", "SINAH6", "SINAF10", "SINAG10", "SINAC9", "SINAC11", "SINAB11", "SINAG11", "SINAG3", "SINAB5", "SINAE8"),
+  Doublets = c(1175, 0, 759, 0, 0, 0, 1392, 1713, 0, 0, 1816, 0, 1134, 2196, 0),
+  Total = c(11082, 9900, 9153, 1410, 3555, 4285, 8059, 7432, 2244, 5799, 6249, 3894, 9796, 4568, 213)
+)
+doublet$Percentage <- doublet$Doublets / doublet$Total * 100
+doublet$Kept <- doublet$Total - doublet$Doublets
+doublet_long <- pivot_longer(doublet[,c(1,2,4,5)], cols = c("Doublets","Kept"), names_to = "Decision", values_to = "nCells")
+
+# plotting
+ggplot(doublet_long, aes(x=nCells, y=Sample, fill=Decision)) +
+  geom_bar(stat = "identity") + theme_minimal() +
+  labs(x = "number of Cells", y = "", fill = "Decision") +
+  scale_fill_manual(values = c("#EC7063", "skyblue"))
+rm(doublet_long)
+```
+
+```{r}
+# filter nucleosome ratio
+ArchR_EHB <- ArchR_EHB[ArchR_EHB$NucleosomeRatio>=0.5 & ArchR_EHB$NucleosomeRatio<=2.0,]
+ArchR_EHB  # 75136 cells
+```
+
+
+## (5) basic stats
+```{r}
+table(ArchR_EHB$Sample)
+```
+
+```{r}
+# plot 1. TSSEnrichment vs log10(nFrags)
+df <- getCellColData(ArchR_EHB, select = c("log10(nFrags)", "TSSEnrichment"))
+ggPoint(x = df[,1], y = df[,2], colorDensity = TRUE, continuousSet = "sambaNight",
+    xlabel = "Log10 Unique Fragments", ylabel = "TSS Enrichment",
+    xlim = c(log10(500), quantile(df[,1], probs = 0.99)), ylim = c(0, quantile(df[,2], probs = 0.99))) + 
+  geom_hline(yintercept = 4, lty = "dashed") + geom_vline(xintercept = 3, lty = "dashed")
+
+rm(df)
+```
+
+```{r}
+# plot 2. TSS enrichment distribution
+plotGroups(ArchR_EHB, groupBy = "Sample", colorBy = "cellColData", name = "TSSEnrichment", plotAs = "violin", alpha = 0.6, addBoxPlot = TRUE)
+```
+
+```{r}
+# plot 3. log10(nFrags) distribution
+plotGroups(ArchR_EHB, groupBy = "Sample", colorBy = "cellColData", name = "log10(nFrags)", plotAs = "ridges", alpha = 0.8)
+```
+
+```{r}
+# plot 4. nucleosome ratio
+plotGroups(ArchR_EHB, groupBy = "Sample", colorBy = "cellColData", name = "NucleosomeRatio", plotAs = "violin", alpha = 0.8)
+```
+
+
+
+# 2. UMAP
+## (1) dimensionality reduction
+```{r}
+# running LSI ~ 12 min
+ArchR_EHB <- addIterativeLSI(ArchR_EHB, useMatrix = "TileMatrix", name = "IterativeLSI", iterations = 3,  # run more iterations to remove subtle batch effect
+                             clusterParams = list(resolution = c(0.2), sampleCells = 10000, n.start = 10),  # See Seurat::FindClusters
+                             varFeatures = 25000, dimsToUse = 1:30, force = TRUE,
+                             excludeChr = c("chrM","chrY")) # excluding chrY DOES affect the result
+```
+
+## (2) no batch correction
+```{r}
+# create UMAP ~ 1.5 min
+set.seed(100)
+ArchR_EHB <- addUMAP(ArchR_EHB, reducedDims = "IterativeLSI", name = "UMAP_noBatchCor", nNeighbors = 30, minDist = 0.2, metric = "cosine", force = TRUE)
+```
+
+```{r}
+# colour by samples
+plotPDF(plotEmbedding(ArchR_EHB, colorBy = "cellColData", name = "ID", embedding = "UMAP_noBatchCor", labelMeans=FALSE, size = 0.01),
+        name = "Script1/UMAP_noBC_sample.pdf", ArchRProj = ArchR_EHB, addDOC = FALSE, width = 6, height = 6)
+
+# colour by age
+plotPDF(plotEmbedding(ArchR_EHB, colorBy = "cellColData", name = "Age", embedding = "UMAP_noBatchCor", labelMeans=FALSE, size = 0.01,
+                      pal = c(CS14="#704D9E", CS16="#BC5AA9", CS17="#ED7C97", CS20="#f79452", CS21="#f2de5c")),
+        name = "Script1/UMAP_noBC_age.pdf", ArchRProj = ArchR_EHB, addDOC = FALSE, width = 6, height = 6)
+
+# colour by region
+plotPDF(plotEmbedding(ArchR_EHB, colorBy = "cellColData", name = "Region", embedding = "UMAP_noBatchCor", labelMeans=FALSE, size = 0.01,
+                      pal = c(Forebrain="#FDE333", CerebellumPons="#53CC67", Medulla="#009B95")),
+        name = "Script1/UMAP_noBC_region.pdf", ArchRProj = ArchR_EHB, addDOC = FALSE, width = 6, height = 6)
+```
+
+
+## (3) batch correction for age
+```{r}
+# correct for batch effect associated with age only ~ 5 min
+ArchR_EHB <- addHarmony(ArchR_EHB, reducedDims = "IterativeLSI", name = "Harmony_age", groupBy = "Age", force = TRUE)
+```
+
+```{r}
+# create UMAP ~ 1.5 min
+set.seed(100)
+ArchR_EHB <- addUMAP(ArchR_EHB, reducedDims = "Harmony_age", name = "UMAP", nNeighbors = 30, minDist = 0.2, metric = "cosine", force = TRUE)
+```
+
+### main fig - basic UMAP
+```{r}
+# colour by samples
+plotPDF(plotEmbedding(ArchR_EHB, colorBy = "cellColData", name = "ID", embedding = "UMAP", labelMeans=FALSE, size = 0.01),
+        name = "Script1/UMAP_BC_sample.pdf", ArchRProj = ArchR_EHB, addDOC = FALSE, width = 6, height = 6)
+
+# colour by age
+plotPDF(plotEmbedding(ArchR_EHB, colorBy = "cellColData", name = "Age", embedding = "UMAP", labelMeans=FALSE, size = 0.01,
+                      pal = c(CS14="#704D9E", CS16="#BC5AA9", CS17="#ED7C97", CS20="#f79452", CS21="#f2de5c")),
+        name = "Script1/UMAP_BC_age.pdf", ArchRProj = ArchR_EHB, addDOC = FALSE, width = 6, height = 6)
+
+# colour by region
+plotPDF(plotEmbedding(ArchR_EHB, colorBy = "cellColData", name = "Region", embedding = "UMAP", labelMeans=FALSE, size = 0.01,
+                      pal = c(Forebrain="#FDE333", CerebellumPons="#53CC67", Medulla="#009B95")),
+        name = "Script1/UMAP_BC_region.pdf", ArchRProj = ArchR_EHB, addDOC = FALSE, width = 6, height = 6)
+```
+
+
+### supp fig - ctMarker UMAP
+```{r}
+# 45 marker genes for 12 cell types
+ctMarkers <- c(
+  "ZEB2","HOPX","CRYAB","PAX6","NES","HES2", # radial glia
+  "SOX10","PAX3","SNAI2",  # neural crest
+  "SOX2","HES1","NKX2-1", # neuronal IPC
+  "NHLH1",  # neuroblast
+  "LHX6","INA","RBFOX3","SYN1","MAPT","DCX","TUBB3","TBR1","FEZF2","SATB2","GAD1","PVALB",  # neuron
+  "TNC","BCAN",  # GB
+  "OLIG1","OLIG2","CNP","PDGFRA",  # OPC
+  "AQP4","GFAP",  # astrocyte
+  "CX3CR1","TREM2",  # microglia
+  "ENG","PDGFRB","ACTA2",  # vascular
+  "GYPA","HBA1","HBB",  # Erythroblast
+  "VIM","FBLIM1","S100A4","FAP"  # fibroblast
+)
+ctMarkers_class <- rep(c("Radial glia", "Neural progenitor", "Neuron", "Glia progenitor", 
+                         "Astrocyte", "Microglia", "Vascular", "Erythroblast","Fibroblast"), 
+                       times = c(6, 7, 12, 6, 2, 2, 3, 3,4))
+```
+
+```{r}
+# UMAP ~ 1 min
+plotPDF(plotEmbedding(ArchR_EHB, colorBy = "GeneScoreMatrix", name = ctMarkers, embedding = "UMAP"), 
+        name = "Script1/UMAP_BC_ctMarkers.pdf", ArchRProj = ArchR_EHB, addDOC = FALSE, width = 5, height = 5)
+```
+
+
+## (4) regional signature
+### supp fig - UMAP
+```{r}
+# colour by region, highlight age
+p <- list()
+for (x in c("CS14","CS16","CS17","CS20","CS21")){
+  p0 <- plotEmbedding(ArchR_EHB, colorBy = "cellColData", name = "Region", embedding = "UMAP", 
+                      highlightCells = ArchR_EHB[ArchR_EHB$Age==x]$cellNames, labelMeans=FALSE,
+                      pal = c(Forebrain="#FDE333", CerebellumPons="#53CC67", Medulla="#009B95", Non.Highlighted = "lightgrey"))
+  p <- append(p, list(p0))
+}
+
+plotPDF(p, name = "Script1/UMAP_BC_ageRegion.pdf", ArchRProj = ArchR_EHB, addDOC = FALSE, width = 6, height = 6)
+rm(x, p0, p)
+```
+
+```{r}
+# colour by region, highlight age
+p <- list()
+for (x in c("Forebrain","CerebellumPons","Medulla")){
+  p0 <- plotEmbedding(ArchR_EHB, colorBy = "cellColData", name = "Age", embedding = "UMAP", 
+                      highlightCells = ArchR_EHB[ArchR_EHB$Region==x]$cellNames, labelMeans=FALSE,
+                      pal = c(CS14="#704D9E", CS16="#BC5AA9", CS17="#ED7C97", CS20="#f79452", CS21="#f2de5c", Non.Highlighted = "lightgrey"))
+  p <- append(p, list(p0))
+}
+
+plotPDF(p, name = "Script1/UMAP_BC_regionAge.pdf", ArchRProj = ArchR_EHB, addDOC = FALSE, width = 6, height = 6)
+rm(x, p0, p)
+```
+
+
+### supp fig - PERMANOVA
+PERMANOVA - tests whether group centroids in multivariate space are significantly different, based on a distance matrix.
+
+```{r}
+# extract UMAP coordiniates
+UMAP_coord <- ArchR_EHB@embeddings@listData[["UMAP"]]@listData[["df"]]
+sum(row.names(UMAP_coord) == ArchR_EHB$cellNames) == nrow(UMAP_coord)
+UMAP_coord$Age <- ArchR_EHB$Age
+UMAP_coord$Region <- ArchR_EHB$Region
+
+# compare ages
+comparison <- data.frame(group1=c("CS14","CS16","CS17","CS20"), group2=c("CS16","CS17","CS20","CS21"))
+
+# downsample to 100
+min(table(ArchR_EHB$ID))
+
+# PERMANOVA with random down-sampling: seed=123, downsample=100
+set.seed(123)
+results <- data.frame()
+for (x in 1:nrow(comparison)){
+  for (y in unique(ArchR_EHB$Region)){
+    UMAP_coord_down <- UMAP_coord %>% filter(Region == y) %>% 
+      group_by(Age) %>% filter(Age %in% comparison[x,]) %>% 
+      sample_n(min(100, n()), replace = FALSE) # downsample for each age and region, n=100
+    dist_matrix <- dist(UMAP_coord_down[,1:2]) # compute Euclidean distance
+    test <- vegan::adonis2(dist_matrix ~ Age, data = UMAP_coord_down, permutations = 999) # PERMANOVA
+    results <- rbind(results, c(comparison[x,], region=y, R2=test$R2[1], p=test$`Pr(>F)`[1]))  
+  }
+  rm(x, y, UMAP_coord_down, dist_matrix, test)
+}
+
+# p values are the same because the number of permutations is small
+# treat the p values as "<0.001"
+```
+
+```{r}
+library(ggraph)
+
+# forebrain
+trial <- results[results$region=="Forebrain",]
+names(trial)[1:2] <- c("source","target")
+ggraph(trial, layout="linear") +
+  geom_edge_arc(edge_colour=rep(c(CS14="#704D9E", CS16="#BC5AA9", CS17="#ED7C97", CS20="#f79452"), each=100), 
+                edge_alpha=0.5, edge_width=5*rep(trial$R2/max(trial$R2),each=100)) +
+  geom_node_point(color=c(CS14="#704D9E", CS16="#BC5AA9", CS17="#ED7C97", CS20="#f79452", CS21="#f2de5c"), size=5) +
+  geom_node_text(aes(label=name), size=8, nudge_y=-0.03,
+                 color=c(CS14="#704D9E", CS16="#BC5AA9", CS17="#ED7C97", CS20="#f79452", CS21="#f2de5c")) +
+  geom_node_text(aes(label=c(paste0("R^2=\n", round(trial$R2,4)),"")),
+                 size=8, nudge_y=0.2, nudge_x=0.5, 
+                 color=c(CS14="#704D9E", CS16="#BC5AA9", CS17="#ED7C97", CS20="#f79452", CS21="#f2de5c")) +
+  theme_void()
+```
+
+```{r}
+# cerebellum pons
+trial <- results[results$region=="CerebellumPons",]
+names(trial)[1:2] <- c("source","target")
+ggraph(trial, layout="linear") +
+  geom_edge_arc(edge_colour=rep(c(CS14="#704D9E", CS16="#BC5AA9", CS17="#ED7C97", CS20="#f79452"), each=100), 
+                edge_alpha=0.5, edge_width=5*rep(trial$R2/max(trial$R2),each=100)) +
+  geom_node_point(color=c(CS14="#704D9E", CS16="#BC5AA9", CS17="#ED7C97", CS20="#f79452", CS21="#f2de5c"), size=5) +
+  geom_node_text(aes(label=name), size=8, nudge_y=-0.03,
+                 color=c(CS14="#704D9E", CS16="#BC5AA9", CS17="#ED7C97", CS20="#f79452", CS21="#f2de5c")) +
+  geom_node_text(aes(label=c(paste0("R^2=\n", round(trial$R2,4)),"")),
+                 size=8, nudge_y=0.2, nudge_x=0.5, 
+                 color=c(CS14="#704D9E", CS16="#BC5AA9", CS17="#ED7C97", CS20="#f79452", CS21="#f2de5c")) +
+  theme_void()
+```
+
+```{r}
+# medulla
+trial <- results[results$region=="Medulla",]
+names(trial)[1:2] <- c("source","target")
+ggraph(trial, layout="linear") +
+  geom_edge_arc(edge_colour=rep(c(CS14="#704D9E", CS16="#BC5AA9", CS17="#ED7C97", CS20="#f79452"), each=100), 
+                edge_alpha=0.5, edge_width=5*rep(trial$R2/max(trial$R2),each=100)) +
+  geom_node_point(color=c(CS14="#704D9E", CS16="#BC5AA9", CS17="#ED7C97", CS20="#f79452", CS21="#f2de5c"), size=5) +
+  geom_node_text(aes(label=name), size=8, nudge_y=-0.03,
+                 color=c(CS14="#704D9E", CS16="#BC5AA9", CS17="#ED7C97", CS20="#f79452", CS21="#f2de5c")) +
+  geom_node_text(aes(label=c(paste0("R^2=\n", round(trial$R2,4)),"")),
+                 size=8, nudge_y=0.2, nudge_x=0.5, 
+                 color=c(CS14="#704D9E", CS16="#BC5AA9", CS17="#ED7C97", CS20="#f79452", CS21="#f2de5c")) +
+  theme_void()
+```
+
+
+
+
+# 3. Clustering
+## (1) Clustree
+```{r}
+# perform clustering at multiple resolutions ~ each takes 2 min
+set.seed(100)
+ArchR_EHB <- addClusters(ArchR_EHB, reducedDims = "Harmony_age", method = "Seurat", name = "Clusters_0.1", 
+                              resolution = 0.1, maxClusters = 3, filterBias = TRUE, biasProportion = 0.2, force = TRUE)
+ArchR_EHB <- addClusters(ArchR_EHB, reducedDims = "Harmony_age", method = "Seurat", name = "Clusters_0.2", 
+                              resolution = 0.2, maxClusters = 5, filterBias = TRUE, biasProportion = 0.2, force = TRUE)
+ArchR_EHB <- addClusters(ArchR_EHB, reducedDims = "Harmony_age", method = "Seurat", name = "Clusters_0.4", 
+                              resolution = 0.4, maxClusters = 10, filterBias = TRUE, biasProportion = 0.2, force = TRUE)
+ArchR_EHB <- addClusters(ArchR_EHB, reducedDims = "Harmony_age", method = "Seurat", name = "Clusters_0.6", 
+                              resolution = 0.6, maxClusters = 15, filterBias = TRUE, biasProportion = 0.2, force = TRUE)
+ArchR_EHB <- addClusters(ArchR_EHB, reducedDims = "Harmony_age", method = "Seurat", name = "Clusters_0.8", 
+                              resolution = 0.8, maxClusters = 25, filterBias = TRUE, biasProportion = 0.2, force = TRUE)
+ArchR_EHB <- addClusters(ArchR_EHB, reducedDims = "Harmony_age", method = "Seurat", name = "Clusters_1.0", 
+                              resolution = 1.0, maxClusters = 50, filterBias = TRUE, biasProportion = 0.2, force = TRUE)
+ArchR_EHB <- addClusters(ArchR_EHB, reducedDims = "Harmony_age", method = "Seurat", name = "Clusters_1.2", 
+                              resolution = 1.2, maxClusters = 50, filterBias = TRUE, biasProportion = 0.2, force = TRUE)
+ArchR_EHB <- addClusters(ArchR_EHB, reducedDims = "Harmony_age", method = "Seurat", name = "Clusters_1.5", 
+                              resolution = 1.5, maxClusters = 50, filterBias = TRUE, biasProportion = 0.2, force = TRUE)
+ArchR_EHB <- addClusters(ArchR_EHB, reducedDims = "Harmony_age", method = "Seurat", name = "Clusters_2.0", 
+                              resolution = 2.0, maxClusters = 50, filterBias = TRUE, biasProportion = 0.2, force = TRUE)
+```
+
+```{r}
+# combine output
+clustree_df <- cbind("C1", ArchR_EHB$Clusters_0.1, ArchR_EHB$Clusters_0.2, ArchR_EHB$Clusters_0.4, ArchR_EHB$Clusters_0.6, ArchR_EHB$Clusters_0.8, ArchR_EHB$Clusters_1.0, ArchR_EHB$Clusters_1.2, ArchR_EHB$Clusters_1.5, ArchR_EHB$Clusters_2.0)
+colnames(clustree_df) <- paste0("resolution", c(0,0.1,0.2,0.4,0.6,0.8,1.0,1.2,1.5,2.0))
+clustree_df <- apply(clustree_df, 2, function(x){x <- sub("C", "", x)})
+
+# plotting ~ 10s
+library(clustree)
+set.seed(100)
+clustree(clustree_df, prefix = "resolution") +
+  guides(edge_colour = "none", edge_alpha = "none", size = "none") +
+  theme(legend.text = element_text(size = 14), legend.title = element_text(size = 16), legend.position = "right")
+rm(clustree_df)
+```
+
+```{r}
+# UMAP, colour by clusters
+plotPDF(plotEmbedding(ArchR_EHB, colorBy = "cellColData", name = "Clusters_2.0", embedding = "UMAP", size = 0.01),
+        name = "Script1/UMAP_BC_cluster_2.0.pdf", ArchRProj = ArchR_EHB, addDOC = FALSE, width = 6, height = 12)
+```
+
+
+## (2) cluster marker genes
+```{r}
+# for 44 clusters, it takes 16 min (restart R session!)
+clusterMarkerGenes <- getMarkerFeatures(ArchR_EHB, useMatrix = "GeneScoreMatrix", groupBy = "Clusters_2.0", 
+                                        bias = c("TSSEnrichment", "log10(nFrags)"), testMethod = "wilcoxon")
+save(clusterMarkerGenes, file="./data_rda/Script1/clusterMarkerGenes.rda")
+```
+
+```{r}
+# heatmap: cluster-specific genes
+p <- plotMarkerHeatmap(clusterMarkerGenes, cutOff = "FDR <= 0.01 & Log2FC >= 1", labelMarkers = ctMarkers, clusterCols = TRUE)
+
+# save image
+png("./ArchR_EHB/Plots/Script1/heatmap_clusterMarkerGenes.png", width = 1500, height = 2000, res = 240)
+draw(p, heatmap_legend_side = "bot")
+dev.off()
+```
+
+```{r}
+# extract full info for cluster marker genes
+markerGeneList <- getMarkers(clusterMarkerGenes, cutOff = "FDR <= 0.01 & Log2FC >= 1")
+sheet_clusterMarkerGene <- data.frame()
+for (x in 1:ncol(clusterMarkerGenes)){
+  df <- cbind("cluster"=paste0("cluster_",x), as.data.frame(markerGeneList[[x]]))
+  sheet_clusterMarkerGene <- rbind(sheet_clusterMarkerGene, df)
+  rm(x,df)
+}
+
+# sanity check: same number of total marker genes as shown on the heatmap
+length(unique(sheet_clusterMarkerGene$name))
+
+# save as spreadsheet!
+write_xlsx(sheet_clusterMarkerGene, path = "./data_output/Script1_ctAnnotation/ctAnnot_sheet1_genes.xlsx")
+
+rm(clusterMarkerGenes, markerGeneList)
+```
+
+
+## (3) cluster marker peaks
+```{r}
+# create pseudobulks ~ 50 min
+set.seed(100)
+addArchRThreads(4)
+library(BSgenome.Hsapiens.UCSC.hg38)
+ArchR_EHB <- addGroupCoverages(ArchR_EHB, groupBy = "Clusters_2.0", force = TRUE)
+```
+
+```{r}
+# peak calling ~ 22 min
+set.seed(100)
+path <- "././Library/Python/3.9/bin/macs2"
+addArchRThreads(8)
+
+ArchR_EHB <- addReproduciblePeakSet(ArchR_EHB, groupBy = "Clusters_2.0", pathToMacs2 = path, excludeChr = c("chrM"), force = TRUE)
+## MUST manually check the log file: search "group", first 8 groups (number of threads) must be processed
+# Otherwise it will get stuck after the last groups are finished
+# If after trying a few times, the first groups are always missing some, restart the R session
+## MUST use force = TRUE, otherwise gets stuck after "Identifying Reproducible Peaks!"
+
+rm(path)
+
+# check peaks
+getPeakSet(ArchR_EHB)
+
+# add matrix to arrow files ~ 6 min
+ArchR_EHB <- addPeakMatrix(ArchR_EHB, force = TRUE)
+
+# a new matrix! NOTE: each ArchR project can only have ONE PeakMatrix
+getAvailableMatrices(ArchR_EHB)
+```
+
+```{r}
+# get cluster marker peaks ~ 20 min
+set.seed(100)
+addArchRThreads(8)
+clusterMarkerPeaks <- getMarkerFeatures(ArchR_EHB, useMatrix = "PeakMatrix", groupBy = "Clusters_2.0",
+                                         bias = c("TSSEnrichment", "log10(nFrags)"), testMethod = "wilcoxon")
+save(clusterMarkerPeaks, file="./data_rda/Script1/clusterMarkerPeaks.rda")
+```
+
+```{r}
+# heatmap: cluster-specific peaks
+p <- plotMarkerHeatmap(clusterMarkerPeaks, cutOff = "FDR <= 0.01 & Log2FC > 1", clusterCols = TRUE)
+
+# save image
+png("./ArchR_EHB/Plots/Script1/heatmap_clusterMarkerPeaks.png", width = 1900, height = 2000, res = 240)
+draw(p, heatmap_legend_side = "bot")
+dev.off()
+```
+
+```{r}
+# get the top 2000 ATAC peaks for each cluster
+sheet_clusterTopPeak <- data.frame()
+for (x in 1:ncol(clusterMarkerPeaks)){
+  fil <- clusterMarkerPeaks[order(clusterMarkerPeaks@assays@data["FDR"]$FDR[x]$x)[1:2000]]
+  log2FC <- fil@assays@data["Log2FC"]$Log2FC[x]
+  FDR <- fil@assays@data["FDR"]$FDR[x]
+  peaks <- as.data.frame(fil@elementMetadata)
+  df <- cbind("cluster"=paste0("cluster_",x), peaks, log2FC, FDR)
+  sheet_clusterTopPeak <- rbind(sheet_clusterTopPeak, df)
+  rm(x,fil,log2FC,FDR,peaks,df)
+}
+
+# sanity check
+nrow(sheet_clusterTopPeak) == 2000*ncol(clusterMarkerPeaks)
+table(sheet_clusterTopPeak$seqnames) # no chrY
+
+# formatting
+names(sheet_clusterTopPeak)[c(3,6:7)] <- c("peakID","log2FC","FDR")
+
+# save as spreadsheet!
+write_xlsx(sheet_clusterTopPeak, path = "./data_output/Script1_ctAnnotation/ctAnnot_sheet2_peaks.xlsx")
+```
+
+
+## (4) cluster marker TF motifs
+```{r}
+# add motif ~ 4 min (the log file may appear to be stuck but don't worry)
+library(BSgenome.Hsapiens.UCSC.hg38)
+ArchR_EHB <- addMotifAnnotations(ArchR_EHB, motifSet = "cisbp", name = "Motif", force = TRUE)
+rm(human_pwms_v2)
+```
+
+```{r}
+# motif enrichment ~ 1 min
+clusterMarkerMotifs <- peakAnnoEnrichment(clusterMarkerPeaks, ArchR_EHB, peakAnnotation = "Motif", 
+                                          background = "bgdPeaks", cutOff = "FDR<=0.01 & Log2FC>=1") # cutoff for significant peaks
+clusterMarkerMotifs@NAMES <- sub("_.*", "", clusterMarkerMotifs@NAMES)
+save(clusterMarkerMotifs, file="./data_rda/Script1/clusterMarkerMotifs.rda")
+```
+
+```{r}
+# plot, displaying all significant motifs per cluster
+p <- plotEnrichHeatmap(clusterMarkerMotifs, cutOff = -log10(0.01), clusterCols = TRUE, n = nrow(clusterMarkerMotifs))
+
+png("./ArchR_EHB/Plots/Script1/heatmap_clusterMarkerMotifs.png", width = 2000, height = 2000, res = 240)
+draw(p, heatmap_legend_side = "bot")
+dev.off()
+```
+
+```{r}
+# motifs spreadsheet: Padj
+fil <- clusterMarkerMotifs[rowSums(clusterMarkerMotifs@assays@data@listData$mlog10Padj >= -log10(0.01)) > 0]
+mlog10Padj <- fil@assays@data@listData$mlog10Padj
+mlog10Padj <- cbind(motif=sub("_.*","",rownames(mlog10Padj)), mlog10Padj)
+Enrichment <- fil@assays@data@listData$Enrichment
+Enrichment <- cbind(motif=sub("_.*","",rownames(Enrichment)), Enrichment)
+sheet_clusterMarkerMotif <- list("mlog10Padj"=mlog10Padj, "Enrichment"=Enrichment)
+
+write_xlsx(list("mlog10Padj"=mlog10Padj, "Enrichment"=Enrichment), path = "./data_output/Script1_ctAnnotation/ctAnnot_sheet3_motifs.xlsx")
+```
+
+
+## (5) save Matrix
+```{r}
+## GeneScoreMatrix
+# get matrix ~ 5 min
+addArchRThreads(2)
+GeneScoreMatrix <- getMatrixFromProject(ArchR_EHB, useMatrix = "GeneScoreMatrix")
+
+# cell name and gene order
+GeneScoreMatrix@NAMES <- GeneScoreMatrix@elementMetadata@listData[["name"]]
+GeneScoreMatrix <- GeneScoreMatrix[, ArchR_EHB$cellNames]
+sum(colnames(GeneScoreMatrix) == ArchR_EHB$cellNames)
+
+# save ~ 8.5 min
+save(GeneScoreMatrix, file = "./data_rda/Script1/GeneScoreMatrix.rda")
+```
+
+```{r}
+## PeakMatrix
+# get matrix ~ 10 min
+addArchRThreads(2)
+PeakMatrix <- getMatrixFromProject(ArchR_EHB, useMatrix = "PeakMatrix")
+
+# save ~ 5 min
+save(PeakMatrix, file = "./data_rda/Script1/PeakMatrix.rda")
+```
+
+
+## (6) plots
+### supp fig - sample stats
+```{r}
+df <- getCellColData(ArchR_EHB, select = c("Sample", "log10(nFrags)", "TSSEnrichment", "NucleosomeRatio", "Clusters_2.0"))
+sum(row.names(df) == ArchR_EHB$cellNames)
+
+# doublet info
+doublet <- data.frame(
+  Sample = c("SINAD11", "SINAF11", "SINAE11", "SINAB9", "SINAA11", "SINAH6", "SINAF10", "SINAG10", "SINAC9", "SINAC11", "SINAB11", "SINAG11", "SINAG3", "SINAB5", "SINAE8"),
+  Doublets = c(1175, 0, 759, 0, 0, 0, 1392, 1713, 0, 0, 1816, 0, 1134, 2196, 0),
+  Total = c(11082, 9900, 9153, 1410, 3555, 4285, 8059, 7432, 2244, 5799, 6249, 3894, 9796, 4568, 213)
+)
+doublet$Percentage <- doublet$Doublets / doublet$Total * 100
+doublet$Kept <- doublet$Total - doublet$Doublets
+
+# heatmap: sample by cluster
+table_cluster <- data.frame()
+for (x in doublet$Sample){
+  for (y in paste0("C",1:44)){
+    n <- nrow(df[ArchR_EHB$Sample==x & ArchR_EHB$Clusters_2.0==y,])
+    table_cluster <- rbind(table_cluster, c(x,y,n))
+  }
+  rm(x,y,n)
+}
+names(table_cluster) <- c("sample","cluster","nCell")
+table_cluster$nCell <- as.numeric(table_cluster$nCell)
+table_cluster <- pivot_wider(table_cluster, names_from = cluster, values_from = nCell)
+df_wide <- table_cluster[ , -1]
+df_wide <- as.matrix(df_wide)
+row.names(df_wide) <- table_cluster$sample
+table_cluster <- df_wide
+rm(df_wide)
+
+# lists
+lists <- list(list_TSS=list(), list_Nucleo=list(), list_nFrags=list())
+for (x in doublet$Sample){
+  lists$list_TSS[[x]] <- data.frame(density(df[ArchR_EHB$Sample==x,]$TSSEnrichment)[c("x", "y")])
+  lists$list_Nucleo[[x]] <- data.frame(density(df[ArchR_EHB$Sample==x,]$NucleosomeRatio)[c("x", "y")])
+  lists$list_nFrags[[x]] <- data.frame(density(df[ArchR_EHB$Sample==x,]$`log10(nFrags)`)[c("x", "y")])
+  lists$list_FRiP[[x]] <- data.frame(density(df[ArchR_EHB$Sample==x,]$`log10(nFrags)`)[c("x", "y")])
+  rm(x)
+}
+```
+
+```{r}
+# plot 1
+colours <- c("#FFFFBB", "#fc7503")
+h <- Heatmap(table_cluster, cluster_columns = FALSE, cluster_rows = FALSE, show_heatmap_legend = FALSE, 
+        row_names_side = "left", rect_gp = gpar(col = "white", lwd = 2), column_title = "Clusters", column_title_side = "bottom",
+        left_annotation = rowAnnotation(
+          "Cell Count" = anno_barplot(doublet[, c("Kept","Doublets")], width = unit(4, "cm"), gp = gpar(fill=colours)),
+          "log10(nFrags)" = anno_joyplot(lists$list_nFrags, width = unit(4, "cm"), scale = 1.3, gp = gpar(fill = 1:15), 
+                                         transparency = 0.75),
+          "Nucleosome Ratio" = anno_joyplot(lists$list_Nucleo, width = unit(4, "cm"), gp = gpar(fill = 1:15), transparency = 0.75),
+          "TSS Enrichment" = anno_joyplot(lists$list_TSS, width = unit(4, "cm"), gp = gpar(fill = 1:15), transparency = 0.75),
+          annotation_name_align = TRUE
+          ))
+draw(h, ht_gap = unit(1,"cm"), merge_legend = TRUE,
+     annotation_legend_list = list(Legend(labels = c("Kept","Doublets"), legend_gp = gpar(fill = colours), title = "")),
+     annotation_legend_side = "right", heatmap_legend_side = "right")
+```
+
+```{r}
+rm(df, doublet, lists, h, colours) # keep table_cluster
+```
+
+
+### supp fig - peak by cluster
+```{r}
+# run after peak calling
+peaks <- getPeakSet(ArchR_EHB)
+summary <- data.frame()
+for (x in unique(ArchR_EHB$Clusters_2.0)){
+  fil <- peaks$peakType[names(peaks) == x]
+  for (y in unique(fil)){
+    summary <- rbind(summary, c(x,y,sum(fil == y)))
+  }
+  rm(x, y, fil)
+}
+names(summary) <- c("cluster","annot","count")
+summary$count <- as.numeric(summary$count)
+summary <- pivot_wider(summary, names_from = annot, values_from = count)
+```
+
+```{r}
+# plot 2
+colours <- c("#FCDD23", "#F8B100", "#CA697C", "#AB74CF", "#48439B")
+h <- Heatmap(table_cluster, name = "Cell count", cluster_columns = FALSE, cluster_rows = FALSE, show_heatmap_legend = TRUE, 
+        rect_gp = gpar(col = "white", lwd = 2), row_names_side = "left", column_names_side = "top",
+        col = colorRamp2(seq(0, 2000, length = 2), c("#FFFFBB", "#fc7503")),
+        bottom_annotation = HeatmapAnnotation("\n" = anno_barplot(summary[,2:5], height = unit(8, "cm"), gp = gpar(fill = colours), axis_param = list(direction = "reverse"))))
+draw(h, merge_legend = TRUE,
+     annotation_legend_list = list(Legend(labels = names(summary)[2:5], legend_gp = gpar(fill = colours), title = "Peak annotation")),
+     annotation_legend_side = "right", heatmap_legend_side = "right")
+```
+
+
+```{r}
+rm(peaks, summary, table_cluster, colours, h)
+```
+
+
+### supp fig - ctMarker heatmap
+```{r}
+load("./data_rda/Script1/clusterMarkerGenes.rda")
+
+# DAG X ctMarker
+ctMarkers_cluster <- clusterMarkerGenes[clusterMarkerGenes@elementMetadata@listData[["name"]] %in% ctMarkers,]
+ctMarkers_cluster_log2FC <- ctMarkers_cluster@assays@data@listData[["Log2FC"]]
+ctMarkers_cluster_FDR <- ctMarkers_cluster@assays@data@listData[["FDR"]]
+row.names(ctMarkers_cluster_log2FC) <- ctMarkers_cluster@elementMetadata@listData[["name"]]
+row.names(ctMarkers_cluster_FDR) <- ctMarkers_cluster@elementMetadata@listData[["name"]]
+names(ctMarkers_cluster_log2FC) <- paste0("C",1:44)
+names(ctMarkers_cluster_FDR) <- paste0("C",1:44)
+
+ctMarkers_cluster_FDR <- as.matrix(ctMarkers_cluster_FDR[ctMarkers,])
+ctMarkers_cluster_log2FC <- as.matrix(ctMarkers_cluster_log2FC[ctMarkers,])
+
+rm(ctMarkers_cluster, clusterMarkerGenes)
+```
+
+```{r}
+# heatmap
+df <- as.data.frame(ctMarkers_class)
+row.names(df) <- ctMarkers
+
+colours <- hcl.colors(9, palette = "Sunset")
+names(colours) <- unique(ctMarkers_class)
+colours <- list(ctMarkers_class = colours)
+
+pheatmap(ctMarkers_cluster_FDR, 
+         cluster_rows = FALSE, cluster_cols = FALSE,
+         gaps_row = c(6,13,25,31,33,35,38,41),
+         annotation_row = df, annotation_names_row = FALSE,
+         annotation_colors = colours, 
+         breaks = c(seq(0, 0.05, length.out = 50), 1),
+         color = c(hcl.colors(100, "Reds 3")[1:49],"lightgrey"))
+
+pheatmap(ctMarkers_cluster_log2FC, 
+         cluster_rows = FALSE, cluster_cols = FALSE,
+         gaps_col = c(5,10,15,20,25,30,35,40),
+         gaps_row = c(6,13,25,31,33,35,38,41),
+         annotation_row = df, annotation_names_row = FALSE,
+         annotation_colors = colours, 
+         breaks = c(seq(-1, -0.1, length.out = 50), 0, seq(0.1, 1, length.out = 50)),
+         heatmap_legend_param = list(title = "gene score"))
+
+rm(df, colours)
+```
+
+
+# 4. ctAnnot
+## (1) cluster spreadsheet
+```{r}
+# basic info
+cluster_info <- data.frame()
+for (x in 1:44){
+  regions <- ArchR_EHB[ArchR_EHB$Clusters_2.0 == paste0("C",x),]$Region
+  cluster_info <- rbind(cluster_info, 
+                        c(paste0("C",x), 
+                        sum(ArchR_EHB$Clusters_2.0 == paste0("C",x)),
+                        round(mean(as.numeric(sub("CS","",ArchR_EHB[ArchR_EHB$Clusters_2.0 == paste0("C",x),]$Age))),2),
+                        paste0(names(which.max(table(regions))), " (", round(max(table(regions)) / length(regions),3), ")")))
+  names(cluster_info) <- c("cluster","cell count","mean age","main region (proportion)")
+  rm(x, regions)
+}
+```
+
+```{r}
+# ctMarkers, with decreasing log2FC
+cluster_DAG <- data.frame()
+for (x in 1:ncol(ctMarkers_cluster_log2FC)){
+  sig <- ctMarkers[ctMarkers_cluster_FDR[,x] < 0.05 & ctMarkers_cluster_log2FC[,x] > 0.6]
+  sig <- sig[order(ctMarkers_cluster_log2FC[sig,x], decreasing = TRUE)]
+  cluster_DAG <- rbind(cluster_DAG, c(paste0("C", x), paste(unlist(sig), collapse = " | ")))
+  rm(x, sig)
+}
+names(cluster_DAG) <- c("cluster", "cell type marker genes (decreasing log2FC)")
+cluster_info <- merge(cluster_info, cluster_DAG, by = c("cluster"))
+
+rm(cluster_DAG)
+```
+
+```{r}
+# top 5 cluster marker genes, with increasing FDR
+ctAnnot_sheet1_genes <- read_excel("./data_output/Script1_ctAnnotation/ctAnnot_sheet1_genes.xlsx")
+
+top_marker_genes <- data.frame()
+for (x in 1:44){
+  top_marker_genes <- rbind(top_marker_genes, c(paste0("C", x),
+       paste(unlist(ctAnnot_sheet1_genes[ctAnnot_sheet1_genes$cluster==paste0("cluster_",x),]$name[1:5]), collapse = " | ")))
+  rm(x)
+}
+names(top_marker_genes) <- c("cluster","top cluster marker genes (increasing FDR)")
+cluster_info <- merge(cluster_info, top_marker_genes, by = c("cluster"))
+
+rm(top_marker_genes)
+```
+
+```{r}
+# top 5 cluster marker TFs, with increasing FDR
+
+# get TFs from the [Human Transcription Factor Database] https://humantfs.ccbr.utoronto.ca/index.php
+Human_TF <- read.table("./data_output/Script1_ctAnnotation/Human_TF_v_1.01.txt", quote="\"", comment.char="")
+Human_TF <- Human_TF$V1  # 1639 human transcription factors
+"ZEB2" %in% Human_TF # includes ZEB2
+
+# get TFs
+fil <- ctAnnot_sheet1_genes[ctAnnot_sheet1_genes$name %in% Human_TF,]
+diff_TF <- data.frame()
+for (x in 1:44){
+  sig_TF <- na.omit(fil[fil$cluster==paste0("cluster_",x),]$name[1:5])
+  sig_TF <- c(paste0("C",x), paste(unlist(sig_TF), collapse = " | "))
+  diff_TF <- rbind(diff_TF, sig_TF)
+  rm(x, sig_TF)
+}
+names(diff_TF) <- c("cluster","top cluster marker TFs (increasing FDR)")
+cluster_info <- merge(cluster_info, diff_TF, by = c("cluster"))
+
+rm(fil, diff_TF, Human_TF, ctAnnot_sheet1_genes)
+```
+
+```{r}
+# top 5 TFs in cluster marker peaks, with decreasing enrichment score
+load("./data_rda/Script1/clusterMarkerMotifs.rda")
+
+top5_cluster <- data.frame()
+for (x in paste0("C", 1:44)){
+  top5 <- clusterMarkerMotifs@NAMES[order(clusterMarkerMotifs@assays@data$Enrichment[,x], decreasing = TRUE)][1:5]
+  top5_cluster <- rbind(top5_cluster, c(x, paste(unlist(top5), collapse = " | ")))
+  rm(x, top5)
+}
+names(top5_cluster) <- c("cluster", "top TFs in cluster marker peaks (decreasing enrichment score)")
+cluster_info <- merge(cluster_info, top5_cluster, by = c("cluster"))
+
+rm(top5_cluster, clusterMarkerMotifs)
+```
+
+```{r}
+# save spreadsheet!
+cluster_info <- cluster_info[order(as.numeric(sub("C","",cluster_info$cluster))),]
+write_xlsx(cluster_info, path = "./data_output/Script1_ctAnnotation/ctAnnot_sheet4_clusterInfo.xlsx")
+
+rm(cluster_info, ctMarkers_cluster_FDR, ctMarkers_cluster_log2FC)
+```
+
+
+## (2) add annot
+```{r}
+# import cluster annotation
+clusterAnnot <- read_excel("./data_output/Script1_ctAnnotation/ctAnnot_sheet5_clusterAnnot.xlsx")
+
+# add cell type annotation (C1, C2, C3, C4 must be replaced in the second round)
+ArchR_EHB$ctAnnot_2.0 <- stri_replace_all_regex(ArchR_EHB$Clusters_2.0, 
+                              pattern = clusterAnnot$cluster[!clusterAnnot$cluster %in% paste0("C",1:4)], 
+                              replacement = clusterAnnot$"cell type"[!clusterAnnot$cluster %in% paste0("C",1:4)],
+                              vectorize = FALSE)
+ArchR_EHB$ctAnnot_2.0 <- stri_replace_all_regex(ArchR_EHB$ctAnnot_2.0, 
+                              pattern = clusterAnnot$cluster, 
+                              replacement = clusterAnnot$"cell type",
+                              vectorize = FALSE)
+
+table(ArchR_EHB$ctAnnot_2.0)
+```
+
+```{r}
+# ctAnnot table
+table <- as.data.frame(cbind(ArchR_EHB$cellNames, ArchR_EHB$ctAnnot_2.0))
+names(table) <- c("ID","annot")
+write.csv(table, file = "./data_output/Script1_ctAnnotation/ctAnnot_ATAC.csv", row.names = FALSE, col.names = FALSE, quote = FALSE)
+```
+
+
+## (3) plots
+### supp fig - ct avg GeneScore
+```{r}
+# get avg ctMarker GeneScore per cell type
+load("./data_rda/Script1/geneScore_ctMarkers.rda")
+geneScore_ctMarkers_avg_ct <- data.frame()
+for (x in names(geneScore_ctMarkers)){
+  for (y in unique(ArchR_EHB$ctAnnot_2.0)){
+    m <- mean(geneScore_ctMarkers[[x]][ArchR_EHB$ctAnnot_2.0==y])
+    geneScore_ctMarkers_avg_ct <- rbind(geneScore_ctMarkers_avg_ct, c(x,y,m))
+  }
+  rm(x,y,m)
+}
+names(geneScore_ctMarkers_avg_ct) <- c("gene","celltype","avgGeneScore")
+geneScore_ctMarkers_avg_ct$avgGeneScore <- as.numeric(geneScore_ctMarkers_avg_ct$avgGeneScore)
+geneScore_ctMarkers_avg_ct$celltype <- factor(geneScore_ctMarkers_avg_ct$celltype, levels=c("Erythroblast","Fibroblast","Glioblast","Radial glia","Neuronal IPC","Neuroblast","Neuron"))
+
+# plot all markers
+#ggplot(geneScore_ctMarkers_avg_ct, aes(x = celltype, y = gene, fill = avgGeneScore)) + geom_tile()
+
+# select representative genes
+fil <- geneScore_ctMarkers_avg_ct[geneScore_ctMarkers_avg_ct$gene %in% c("HBA1","FBLIM1","BCAN","NES","NKX2-1","NHLH1","RBFOX3"),]
+fil$gene <- factor(fil$gene, levels = c("HBA1","FBLIM1","BCAN","NES","NKX2-1","NHLH1","RBFOX3"))
+#ggplot(fil, aes(x = celltype, y = gene, fill = avgGeneScore)) + geom_tile() + labs(fill = "avgGeneScore")
+```
+
+```{r}
+# normalise across group for each gene
+fil_norm <- fil
+for (x in unique(fil_norm$gene)){
+  max <- max(fil_norm$avgGeneScore[fil_norm$gene==x])
+  fil_norm$avgGeneScore[fil_norm$gene==x] <- fil_norm$avgGeneScore[fil_norm$gene==x]/max
+  rm(x, max)
+}
+ggplot(fil_norm, aes(x = celltype, y = gene, fill = avgGeneScore)) + 
+  geom_tile() + BuenColors::pretty_plot() +
+  labs(x = "", y = "", fill = "normalised \ngene score") + 
+  theme(axis.text.x = element_text(angle = 45, size = 10, hjust = 1),
+        axis.text.y = element_text(size = 10), legend.position = "right") +
+  scale_fill_gradientn(colors = RColorBrewer::brewer.pal(9, "YlOrRd"))
+```
+
+```{r}
+rm(geneScore_ctMarkers_avg_ct, fil, fil_norm)
+```
+
+
+### main fig - ct UMAP
+```{r}
+# UMAP colour by cell type
+plotPDF(plotEmbedding(ArchR_EHB, colorBy = "cellColData", name = "ctAnnot_2.0", embedding = "UMAP", labelMeans=FALSE, size = 0.01,
+                      pal = c(Erythroblast="#f75c63", Fibroblast="#d1a279", Neuron="#3ee2ff", Neuroblast="#00cfff",
+                              "Neuronal IPC" = "#40a1ff", 'Radial glia'="#836dff", Glioblast="#c47df0")),
+        name = "Script1/UMAP_ctAnnot.pdf", ArchRProj = ArchR_EHB, addDOC = FALSE, width = 6, height = 6)
+```
+
+
+### supp fig - ct bar plot
+```{r}
+annot_summary <- data.frame()
+for (x in unique(ArchR_EHB$Age)){
+  for (y in unique(ArchR_EHB$Region)){
+    for (z in unique(ArchR_EHB$ctAnnot_2.0)){
+      n <- sum(ArchR_EHB$Age==x & ArchR_EHB$Region==y & ArchR_EHB$ctAnnot_2.0==z)
+      p <- n/sum(ArchR_EHB$Age==x & ArchR_EHB$Region==y)
+      annot_summary <- rbind(annot_summary, c(x,y,z,n,p))
+    }
+  }
+  rm(x,y,z,n,p)
+}
+names(annot_summary) <- c("Age", "Region", "CellType", "nCell", "Proportion")
+annot_summary$nCell <- as.numeric(annot_summary$nCell)
+annot_summary$Proportion <- as.numeric(annot_summary$Proportion)
+annot_summary$Region <- factor(annot_summary$Region, levels=c("Forebrain","CerebellumPons","Medulla"))
+annot_summary$CellType <- sub("Neuronal IPC", "n-IPC", annot_summary$CellType)
+annot_summary$CellType <- factor(annot_summary$CellType, levels = c("Erythroblast", "Fibroblast", "Neuron", "Neuroblast", "n-IPC", "Radial glia", "Glioblast"))
+
+# plot
+colours <- c(Erythroblast="#f75c63", Fibroblast="#d1a279", Neuron="#3ee2ff", Neuroblast="#00cfff",
+             "n-IPC" = "#40a1ff", 'Radial glia'="#836dff", Glioblast="#c47df0")
+ggplot(annot_summary, aes(x = Age, y = Proportion, fill = Region)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap2(~CellType, nrow = 1, strip = strip_themed(background_x = lapply(colours, function(col) element_rect(fill = col)))) + 
+  theme_bw() + labs(x = "", y = "Proportion") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, size = 10),
+        axis.text.y = element_text(size = 10), legend.position = "bottom") +
+  scale_fill_manual(values = c(Forebrain="#FDE333", CerebellumPons="#53CC67", Medulla="#009B95"))
+```
+
+
+### main fig - ct trend plot
+```{r}
+annot_summary$Age <- as.numeric(sub("CS","",annot_summary$Age))
+annot_summary$CellType <- factor(annot_summary$CellType, c("Erythroblast","Fibroblast","Glioblast","Radial glia","n-IPC","Neuroblast","Neuron"))
+```
+
+```{r}
+# plotting
+p1 <- ggplot(annot_summary[annot_summary$Region=="Forebrain",], aes(x=Age, y=Proportion, fill=CellType)) + 
+  geom_area() + xlab("Carnegie Stage") + ggtitle("Forebrain") + theme_bw() +
+  scale_fill_manual(values = c(Erythroblast="#f75c63", Fibroblast="#d1a279", Neuron="#3ee2ff", Neuroblast="#00cfff",
+                              "n-IPC" = "#40a1ff", 'Radial glia'="#836dff", Glioblast="#c47df0")) +
+  scale_x_continuous(breaks = c(14,16,17,20,21), labels = c("CS14", "CS16", "CS17", "CS20", "CS21")) +
+  BuenColors::pretty_plot() +
+  theme(axis.title.x = element_blank(), axis.text.x = element_text(angle=45, hjust=1),
+        plot.title = element_text(size = 10), legend.title = element_blank())
+
+p3 <- ggplot(annot_summary[annot_summary$Region=="Medulla",], aes(x=Age, y=Proportion, fill=CellType)) + 
+  geom_area() + xlab("Carnegie Stage") + ggtitle("Medulla") + theme_bw() +
+  scale_fill_manual(values = c(Erythroblast="#f75c63", Fibroblast="#d1a279", Neuron="#3ee2ff", Neuroblast="#00cfff",
+                              "n-IPC" = "#40a1ff", 'Radial glia'="#836dff", Glioblast="#c47df0")) +
+  scale_x_continuous(breaks = c(14,16,17,20,21), labels = c("CS14", "CS16", "CS17", "CS20", "CS21")) +
+  ylab("") + BuenColors::pretty_plot() +
+  theme(axis.title.x = element_blank(), axis.text.x = element_text(angle=45, hjust=1),
+        plot.title = element_text(size = 10), legend.title = element_blank())
+
+p2 <- ggplot(annot_summary[annot_summary$Region=="CerebellumPons",], aes(x=Age, y=Proportion, fill=CellType)) + 
+  geom_area() + xlab("Carnegie Stage") + ggtitle("Cerebellum & Pons") + theme_bw() +
+  scale_fill_manual(values = c(Erythroblast="#f75c63", Fibroblast="#d1a279", Neuron="#3ee2ff", Neuroblast="#00cfff",
+                              "n-IPC" = "#40a1ff", 'Radial glia'="#836dff", Glioblast="#c47df0")) +
+  scale_x_continuous(breaks = c(14,16,17,20,21), labels = c("CS14", "CS16", "CS17", "CS20", "CS21")) +
+  ylab("") + BuenColors::pretty_plot() +
+  theme(axis.title.x = element_blank(), axis.text.x = element_text(angle=45, hjust=1),
+        plot.title = element_text(size = 10), legend.title = element_blank())
+
+p1 + p2 + p3 + plot_layout(guides = 'collect')
+```
+
+```{r}
+rm(annot_summary, p1, p2, p3)
+```
+
+
+### supp fig - cluster dendro-heatmap
+```{r}
+# hierarchical clustering: top 20 reduced dimensions for the clusters!
+top20_dimensions <- ArchR_EHB@reducedDims@listData[["Harmony_age"]]@listData[["matDR"]][,1:20]
+cluster_PCA <- data.frame()
+for (x in 1:44){
+  cluster_PCA <- rbind(cluster_PCA, colMeans(top20_dimensions[ArchR_EHB$Clusters_2.0==paste0("C",x),]))
+}
+row.names(cluster_PCA) <- paste0("C",1:44)
+names(cluster_PCA) <- paste0("PC",1:20)
+rm(x, top20_dimensions)
+
+# cluster cell count
+df_nCell <- table(ArchR_EHB$Clusters_2.0)
+df_nCell <- as.numeric(df_nCell)
+```
+
+```{r}
+# age
+df_age <- data.frame()
+for (x in paste0("C",1:44)){
+  for (y in c("CS14","CS16","CS17","CS20","CS21")){
+  nCell <- length(ArchR_EHB$cellNames[ArchR_EHB$Clusters_2.0==x & ArchR_EHB$Age==y])
+  df_age <- rbind(df_age, c(x,y,nCell))
+  }
+  rm(x,y,nCell)
+}
+names(df_age) <- c("cluster","age","nCell")
+df_age$nCell <- as.numeric(df_age$nCell)
+
+# region
+df_region <- data.frame()
+for (x in paste0("C",1:44)){
+  for (y in unique(ArchR_EHB$Region)){
+  nCell <- length(ArchR_EHB$cellNames[ArchR_EHB$Clusters_2.0==x & ArchR_EHB$Region==y])
+  df_region <- rbind(df_region, c(x,y,nCell))
+  }
+  rm(x,y,nCell)
+}
+names(df_region) <- c("cluster","region","nCell")
+df_region$nCell <- as.numeric(df_region$nCell)
+
+
+# df to matrix
+df_age <- pivot_wider(df_age, names_from = age, values_from = nCell)
+df_wide <- df_age[ , -1]
+df_wide <- as.matrix(df_wide)
+row.names(df_wide) <- df_age$cluster
+df_age <- df_wide
+
+df_region <- pivot_wider(df_region, names_from = region, values_from = nCell)
+df_wide <- df_region[ , -1]
+df_wide <- as.matrix(df_wide)
+row.names(df_wide) <- df_region$cluster
+df_region <- df_wide
+
+rm(df_wide)
+```
+
+```{r}
+# cell type marker heatmap
+df <-geneScore_ctMarkers_avg[geneScore_ctMarkers_avg$gene %in% c("HBA1","FBLIM1","BCAN","NES","NKX2-1","NHLH1","RBFOX3"),]
+
+# normalise by row!
+for (x in unique(df$gene)){
+  max <- max(df$genescore[df$gene==x])
+  df$genescore[df$gene==x] <- df$genescore[df$gene==x]/max
+  rm(x, max)
+}
+
+# formatting matrix
+df <- pivot_wider(df, names_from = gene, values_from = genescore)
+df_wide <- as.matrix(df[,-1])
+row.names(df_wide) <- df$cluster
+df_ctMarker <- df_wide
+rm(df, df_wide)
+```
+
+```{r}
+# plotting
+## Tutorial: https://jokergoo.github.io/ComplexHeatmap-reference/book/index.html
+library(ComplexHeatmap)
+library(circlize)
+library(dendextend)
+
+h1 <- Heatmap(t(df_age), cluster_rows = FALSE, show_heatmap_legend = FALSE,
+              rect_gp = gpar(col = "white", lwd = 2), #column_names_gp = grid::gpar(fontsize = 0), 
+        col = colorRamp2(seq(0, max(df_age), length = 2), c("#FFFFBB", "#fc7503")),
+        row_title = "cell count", row_title_side = "left",
+        cluster_columns = color_branches(as.dendrogram(hclust(dist(cluster_PCA))), k=3), column_dend_height = unit(2, "cm"),
+        top_annotation = HeatmapAnnotation("cell count" = anno_barplot(df_nCell, gp = gpar(fill = "lightyellow")),
+                                           "cell type" = clusterAnnot$"cell type", show_legend = FALSE,
+                                           col = list("cell type" = c(Erythroblast="#f75c63", Fibroblast="#d1a279", Neuron="#3ee2ff",
+                                                                   Neuroblast="#00cfff","Neuronal IPC" = "#40a1ff", 
+                                                                   'Radial glia'="#836dff", Glioblast="#c47df0"))),
+        right_annotation = rowAnnotation(foo = colnames(df_age), show_legend = FALSE,
+                                         col = list(foo = c(CS14="#704D9E", CS16="#BC5AA9", CS17="#ED7C97",
+                                                            CS20="#f79452", CS21="#f2de5c")),
+                                         annotation_name_gp = grid::gpar(fontsize = 0)))
+
+h2 <- Heatmap(t(df_region), cluster_rows = FALSE, show_heatmap_legend = FALSE,
+              rect_gp = gpar(col = "white", lwd = 2), # column_names_gp = grid::gpar(fontsize = 0),
+        col = colorRamp2(seq(0, max(df_region), length = 2), c("#FFDDDD", "red")),
+        row_title = "cell count", row_title_side = "left",
+        right_annotation = rowAnnotation(foo = colnames(df_region), show_legend = FALSE,
+                                         col = list(foo = c(Forebrain="#FDE333", CerebellumPons="#53CC67", Medulla="#009B95")),
+                                         annotation_name_gp = grid::gpar(fontsize = 0)))
+
+h3 <- Heatmap(t(df_ctMarker), cluster_rows = FALSE, show_heatmap_legend = FALSE,
+              rect_gp = gpar(col = "white", lwd = 2), # column_names_gp = grid::gpar(fontsize = 0),
+        col = colorRamp2(seq(0, 1, length = 2), c("#FFEEFF", "#BC5AA9")),
+        row_title = "gene score", row_title_side = "left",
+        right_annotation = rowAnnotation(foo = colnames(df_ctMarker), show_legend = FALSE,
+                                        col = list(foo = c(HBA1="#f75c63", FBLIM1="#d1a279", RBFOX3="#3ee2ff",
+                                                           NHLH1="#00cfff","NKX2-1" = "#40a1ff", NES="#836dff",BCAN="#c47df0")),
+                                        annotation_name_gp = grid::gpar(fontsize = 0)))
+
+h1 %v% h2 %v% h3
+```
+
+```{r}
+rm(cluster_PCA, df_nCell, df_age, df_region, df_ctMarker, h1, h2, h3, geneScore_ctMarkers_avg, clusterAnnot)
+```
+
+
+### main fig - ct-region summary
+```{r}
+# add ctRegion
+ArchR_EHB$ctRegion <- paste0(stri_replace_all_regex(ArchR_EHB$ctAnnot_2.0,
+                                                    pattern = c("Neuronal IPC", "Radial glia"),
+                                                    replacement = c("n-IPC", "RG"), vectorize = FALSE), "_",
+                             stri_replace_all_regex(ArchR_EHB$Region, 
+                                                    pattern = c("Forebrain","Medulla","CerebellumPons"),
+                                                    replacement = c("FB","MD","CP"), vectorize = FALSE))
+
+# select genes and ct-region groups
+selectGenes <- c("HBA1","FBLIM1","BCAN","NES","NKX2-1","NHLH1","RBFOX3")
+selectGroups <- c("Erythroblast_FB","Erythroblast_CP","Erythroblast_MD", 
+                  "Fibroblast_FB", # remove hindbrain fibroblast, not enough cells, track plot shows mostly noise!
+                  "Glioblast_CP", "Glioblast_MD", # remove forebrain glioblast, not enough cells, not enough for motif enrichment
+                  "RG_FB", "RG_CP", "RG_MD",
+                  "n-IPC_FB", "n-IPC_CP", "n-IPC_MD",
+                  "Neuroblast_FB", "Neuroblast_CP", "Neuroblast_MD",
+                  "Neuron_FB", "Neuron_CP", "Neuron_MD")
+```
+
+```{r}
+# avg marker gene score in ct-region groups
+ctMarker_summary <- data.frame()
+for (x in unique(ArchR_EHB$ctRegion)){
+  for (y in names(geneScore_ctMarkers)){
+    ctMarker_summary <- rbind(ctMarker_summary, c(x,y,mean(geneScore_ctMarkers[[y]][ArchR_EHB$ctRegion==x])))
+  }
+  rm(x, y)
+}
+names(ctMarker_summary) <- c("ctRegion", "gene", "geneScore")
+ctMarker_summary$geneScore <- as.numeric(ctMarker_summary$geneScore)
+df <- ctMarker_summary[ctMarker_summary$gene %in% selectGenes & ctMarker_summary$ctRegion %in% selectGroups,]
+df$gene <- factor(df$gene, levels = selectGenes)
+df$ctRegion <- factor(df$ctRegion, levels = rev(selectGroups))
+
+# normalise gene score
+df$geneScore_norm <- df$geneScore
+for (x in selectGenes){
+  df$geneScore_norm[df$gene==x] <- ( df$geneScore_norm[df$gene==x] - min(df$geneScore_norm[df$gene==x]) ) / ( max(df$geneScore_norm[df$gene==x]) - min(df$geneScore_norm[df$gene==x]) )
+  rm(x)
+}
+
+# dot plot
+p1 <- ggplot(df, aes(x=gene,y=ctRegion)) +
+  geom_point(aes(size=geneScore_norm, fill=geneScore_norm), shape = 21) +
+  theme_bw() + scale_size_continuous(range = c(0,5)) +
+  scale_x_discrete(position = "top") +
+  scale_fill_gradient2(low="lightyellow",mid="yellow",high="red", midpoint=0.4) +
+  theme(axis.text.x = element_text(angle=90, hjust = 0, size = 14), axis.text.y = element_text(size = 14),
+        axis.title.x = element_blank(), axis.title.y = element_blank(), 
+        legend.text = element_text(size = 12), legend.title = element_text(size = 12)) +
+  guides(fill = guide_legend(title="normalised \ngene score"), 
+         size = guide_legend(title="normalised \ngene score"))
+```
+
+```{r}
+# track plot ~ 20s
+p0 <- plotBrowserTrack(ArchR_EHB, groupBy = "ctRegion", useGroups = selectGroups,
+                       geneSymbol = selectGenes, sizes = c(10, 0.0001, 0.0001, 0.0001),
+                       pal = c(Erythroblast_FB="#f75c63", Erythroblast_CP="#f75c63", Erythroblast_MD="#f75c63",
+                               Fibroblast_FB="#d1a279", Fibroblast_CP="#d1a279", Fibroblast_MD="#d1a279", 
+                               Neuron_FB="#3ee2ff", Neuron_CP="#3ee2ff", Neuron_MD="#3ee2ff", 
+                               Neuroblast_FB="#00cfff", Neuroblast_CP="#00cfff", Neuroblast_MD="#00cfff", 
+                              "n-IPC_FB" = "#40a1ff", "n-IPC_CP" = "#40a1ff", "n-IPC_MD" = "#40a1ff", 
+                              RG_FB="#836dff", RG_CP="#836dff", RG_MD="#836dff", 
+                              Glioblast_FB="#c47df0", Glioblast_CP="#c47df0", Glioblast_MD="#c47df0"))
+```
+
+```{r}
+# formatting
+p2 <- p0
+for (i in 1:length(p2)){
+  p2[[i]]$layout <- p2[[i]]$layout[1:21,]
+  p2[[i]]$grobs <- p2[[i]]$grobs[1:21]
+  p2[[i]]$widths[1:5] <- unit(0,"cm")
+  p2[[i]]$widths[8:14] <- unit(0,"cm")
+  p2[[i]]$heights[1:3] <- unit(0,"cm") # title space, if no title the set as unit(0.8, "cm")
+  p2[[i]]$heights[78:124] <- unit(0,"cm")
+  p2[[i]]$heights[78] <- unit(0.2,"cm")
+  
+  # add titles
+  title_grob <- textGrob(label = selectGenes[i], rot = 90, gp = gpar(fontsize = 14, col = "grey30"))
+  p2[[i]] <- arrangeGrob(title_grob, p2[[i]], ncol = 1, heights = unit.c(unit(2.4, "cm"), unit(1, "npc") - unit(2.4, "cm")))
+  
+  rm(i)
+}
+p2 <- grid.arrange(grobs = p2, ncol = 7)
+```
+
+
+```{r}
+p1 + p2 + guide_area() +
+  textGrob(label = "                       gene score", gp = gpar(fontsize = 15, col = "grey30")) +
+  textGrob(label = "chromatin accessibility", gp = gpar(fontsize = 15, col = "grey30")) +
+  plot_spacer() + plot_layout(guides = 'collect', widths = c(1, 1.5, 0.5), heights = c(20,1))
+```
+
+
+
+# 5. Sub-UMAPs
+## (1) supp fig - by region
+```{r}
+set.seed(100)
+addArchRThreads(4)
+ArchR_fil <- list()
+
+# 4 threads ~ 9 min
+for (x in unique(ArchR_EHB$Region)){
+  print(x)
+  ArchR_fil[[x]] <- ArchR_EHB[ArchR_EHB$Region==x,]
+  ArchR_fil[[x]]@projectMetadata@listData$outputDirectory <- "./ArchR_fil"
+  
+  # redo dimensionality reduction
+  ArchR_fil[[x]] <- addIterativeLSI(ArchR_fil[[x]], useMatrix = "TileMatrix", name = "IterativeLSI", iterations = 3,
+                                   clusterParams = list(resolution = c(0.2), sampleCells = 10000, n.start = 10),
+                                   varFeatures = 25000, dimsToUse = 1:30, force = TRUE,
+                                   excludeChr = c("chrM","chrY"))
+  
+  # add UMAP, no batch correction
+  ArchR_fil[[x]] <- addUMAP(ArchR_fil[[x]], reducedDims = "IterativeLSI", name = "UMAP", 
+                            nNeighbors = 30, minDist = 0.5, metric = "cosine", force = TRUE)
+
+  # UMAP, colour by cell type
+  plotPDF(plotEmbedding(ArchR_fil[[x]], colorBy = "cellColData", name = "ctAnnot_2.0", embedding = "UMAP", 
+                        labelMeans=FALSE, size = 0.01, 
+                        pal = c(Erythroblast="#f75c63", Fibroblast="#d1a279", Neuron="#3ee2ff", Neuroblast="#00cfff",
+                                "Neuronal IPC" = "#40a1ff", 'Radial glia'="#836dff", Glioblast="#c47df0")), 
+          name = paste0("UMAP_region_redo_",x,"_ct.pdf"), ArchRProj = ArchR_fil[[x]], 
+          addDOC = FALSE, width = 6, height = 6)
+  
+  # UMAP, colour by age
+  plotPDF(plotEmbedding(ArchR_fil[[x]], colorBy = "cellColData", name = "Age", embedding = "UMAP", 
+                        labelMeans=FALSE, size = 0.01, 
+                        pal = c(CS14="#704D9E", CS16="#BC5AA9", CS17="#ED7C97", CS20="#f79452", CS21="#f2de5c")), 
+          name = paste0("UMAP_region_redo_",x,"_age.pdf"), ArchRProj = ArchR_fil[[x]], 
+          addDOC = FALSE, width = 6, height = 6)
+  
+  rm(x)
+}
+
+# save ~ 30s
+ArchR_fil_region <- ArchR_fil
+save(ArchR_fil_region, file="./ArchR_fil/ArchR_fil_region_redo.rda")
+rm(ArchR_fil, ArchR_fil_region)
+```
+
+
+## (2) main fig - by cell type
+```{r}
+set.seed(100)
+addArchRThreads(4)
+ArchR_fil <- list()
+
+# 4 threads ~ 20 min
+a <- Sys.time()
+for (x in unique(ArchR_EHB$ctAnnot_2.0)){
+  print(x)
+  ArchR_fil[[x]] <- ArchR_EHB[ArchR_EHB$ctAnnot_2.0==x,]
+  ArchR_fil[[x]]@projectMetadata@listData$outputDirectory <- "./ArchR_fil"
+  
+  # redo dimensionality reduction
+  ArchR_fil[[x]] <- addIterativeLSI(ArchR_fil[[x]], useMatrix = "TileMatrix", name = "IterativeLSI", iterations = 3,
+                                   clusterParams = list(resolution = c(0.2), sampleCells = 5000, n.start = 10),
+                                   varFeatures = 25000, dimsToUse = 1:30, force = TRUE,
+                                   excludeChr = c("chrM","chrY"))
+  
+  # add UMAP, no batch correction
+  ArchR_fil[[x]] <- addUMAP(ArchR_fil[[x]], reducedDims = "IterativeLSI", name = "UMAP", 
+                            nNeighbors = 30, minDist = 0.5, metric = "cosine", force = TRUE)
+
+  # UMAP, colour by age
+  plotPDF(plotEmbedding(ArchR_fil[[x]], colorBy = "cellColData", name = "Age", embedding = "UMAP", 
+                        labelMeans=FALSE, size = 0.01, 
+                        pal = c(CS14="#704D9E", CS16="#BC5AA9", CS17="#ED7C97", CS20="#f79452", CS21="#f2de5c")), 
+          name = paste0("UMAP_ct_",x,"_age.pdf"), ArchRProj = ArchR_fil[[x]], 
+          addDOC = FALSE, width = 6, height = 6)
+  
+  # UMAP, colour by region
+  plotPDF(plotEmbedding(ArchR_fil[[x]], colorBy = "cellColData", name = "Region", embedding = "UMAP", 
+                        labelMeans=FALSE, size = 0.01, 
+                        pal = c(Forebrain="#FDE333", CerebellumPons="#53CC67", Medulla="#009B95")), 
+          name = paste0("UMAP_ct_",x,"_region.pdf"), ArchRProj = ArchR_fil[[x]], 
+          addDOC = FALSE, width = 6, height = 6)
+  
+  rm(x)
+}
+b <- Sys.time()
+b-a
+
+
+# save ~ 30s
+ArchR_fil_ct <- ArchR_fil
+save(ArchR_fil_ct, file="./ArchR_fil/ArchR_fil_ct_redo.rda")
+rm(ArchR_fil, ArchR_fil_ct)
+```
+
+
+## (3) supp fig - ctRegion avg GeneScore
+```{r}
+# get average GeneScore per cell type for each marker gene
+load("./data_rda/Script1/geneScore_ctMarkers.rda")
+geneScore_ctMarkers_avg_ct_region <- list()
+for (region in unique(ArchR_EHB$Region)){
+  geneScore_ctMarkers_avg_ct_region[[region]] <- data.frame()
+  for (x in names(geneScore_ctMarkers)){
+    for (y in unique(ArchR_EHB$ctAnnot_2.0)){
+      m <- mean(geneScore_ctMarkers[[x]][ArchR_EHB$ctAnnot_2.0==y & ArchR_EHB$Region==region])
+      geneScore_ctMarkers_avg_ct_region[[region]] <- rbind(geneScore_ctMarkers_avg_ct_region[[region]], c(x,y,m))
+      }
+  }
+  names(geneScore_ctMarkers_avg_ct_region[[region]]) <- c("gene","celltype","avgGeneScore")
+  geneScore_ctMarkers_avg_ct_region[[region]]$avgGeneScore <- as.numeric(geneScore_ctMarkers_avg_ct_region[[region]]$avgGeneScore)
+  geneScore_ctMarkers_avg_ct_region[[region]]$celltype <- factor(geneScore_ctMarkers_avg_ct_region[[region]]$celltype, levels=c("Erythroblast","Fibroblast","Glioblast","Radial glia","Neuronal IPC","Neuroblast","Neuron"))
+  rm(x,y,m,region)
+}
+rm(geneScore_ctMarkers)
+```
+
+```{r}
+colours <- c(Forebrain="#FDE333", CerebellumPons="#53CC67", Medulla="#009B95")
+p <- list()
+for (region in unique(ArchR_EHB$Region)){
+  # select representative genes
+  data <- geneScore_ctMarkers_avg_ct_region[[region]]
+  fil <- data[data$gene %in% c("HBA1","FBLIM1","BCAN","NES","NKX2-1","NHLH1","RBFOX3"),]
+  fil$gene <- factor(fil$gene, levels = c("HBA1","FBLIM1","BCAN","NES","NKX2-1","NHLH1","RBFOX3"))
+
+  # normalise across group for each gene
+  fil_norm <- fil
+  for (x in unique(fil_norm$gene)){
+    max <- max(fil_norm$avgGeneScore[fil_norm$gene==x])
+    fil_norm$avgGeneScore[fil_norm$gene==x] <- fil_norm$avgGeneScore[fil_norm$gene==x]/max
+  }
+  p[[region]] <- ggplot(fil_norm, aes(x = celltype, y = gene, fill = avgGeneScore)) + 
+    geom_tile() + BuenColors::pretty_plot() + ggtitle(region) + 
+    labs(x="", y="" , fill = "normGeneScore") +
+    theme(axis.text.x = element_text(angle=45, hjust=1, size = 10), axis.text.y = element_text(size = 10)) + 
+    scale_fill_gradient(high = colours[region], low = "white", name = "normalised \ngene score \n")
+  rm(x,max,region,data, fil, fil_norm)
+}
+
+wrap_plots(p, ncol=3)
+```
+
+```{r}
+names(p)
+p
+```
+
+```{r}
+rm(p, geneScore_ctMarkers_avg_ct_region)
+```
+
+
+
+# 6. Save project
+```{r}
+save(ArchR_EHB, EHB_10x_samples, ctMarkers, ctMarkers_class, file = "./data_rda/Script1/ArchR_Project.rda")
+```
+

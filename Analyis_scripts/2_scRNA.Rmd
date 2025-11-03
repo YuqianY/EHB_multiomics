@@ -1,0 +1,724 @@
+Linking scRNA samples to scATAC samples
+
+```{r}
+library(ArchR)
+addArchRGenome("hg38")
+
+library(Seurat)
+library(readxl)
+library(htmlwidgets)
+library(tidyr)
+library(dplyr)
+#library(ggdendro) # clean up
+library(ggsankey)
+library(stringi)
+library(plotly)
+library(pheatmap)
+library(RColorBrewer)
+```
+
+
+
+# 1. scRNA atlas mapping
+## (1) import RNA counts
+```{r}
+# import RNA counts ~ 6 min
+counts_multiome <- Read10X(data.dir = "./data_input/data_EHB_multiome")
+counts_multiome <- counts_multiome$`Gene Expression`
+counts_scRNA <- Read10X(data.dir = "./data_input/data_EHB_scRNA")
+counts_Braun <- Read10X(data.dir= "./data_input/data_Braun_15-21")
+
+# inspect
+dim(counts_multiome) # 36601 genes x 12700 cells
+dim(counts_scRNA) # 33538 genes x 9909 cells
+dim(counts_Braun) # 33538 genes x116114  cells
+
+# find overlapping genes
+sum(counts_Braun@Dimnames[[1]] %in% counts_scRNA@Dimnames[[1]])  # 33538 genes overlapping with scRNA
+sum(counts_Braun@Dimnames[[1]] %in% counts_multiome@Dimnames[[1]])  # 31915 genes overlapping with multiome
+ol_genes <- counts_Braun@Dimnames[[1]][counts_Braun@Dimnames[[1]] %in% counts_multiome@Dimnames[[1]]]
+counts_multiome <- counts_multiome[ol_genes,]
+counts_scRNA <- counts_scRNA[ol_genes,]
+counts_Braun <- counts_Braun[ol_genes,]
+```
+
+```{r}
+# split Braun into V2 and V3 chemistry
+counts_Braun@Dimnames[[2]] <- sub("'","",sub("b'","",counts_Braun@Dimnames[[2]]))
+counts_Braun_V2 <- counts_Braun[, !sub("_.*","",counts_Braun@Dimnames[[2]]) %in% c("10X177","10X178","10X298")]
+counts_Braun_V3 <- counts_Braun[, sub("_.*","",counts_Braun@Dimnames[[2]]) %in% c("10X177","10X178","10X298")]
+dim(counts_Braun_V2)  # 31915 genes X 71797 cells
+dim(counts_Braun_V3)  # 31915 genes X 44317 cells
+
+# make Seurat object ~ 1 min
+Seurat_multiome <- CreateSeuratObject(counts_multiome, project = "10X_multiome")
+Seurat_scRNA <- CreateSeuratObject(counts_scRNA, project = "10X_scRNA")
+Seurat_Braun_V2 <- CreateSeuratObject(counts_Braun_V2, project = "10X_Braun_V2")
+Seurat_Braun_V3 <- CreateSeuratObject(counts_Braun_V3, project = "10X_Braun_V3")
+Seurat_combined <- merge(Seurat_multiome, c(Seurat_scRNA,Seurat_Braun_V2,Seurat_Braun_V3), project = "10X_combined")
+dim(Seurat_combined)  # 31915 genes X 138723 cells
+table(Seurat_combined$orig.ident)
+
+# metadata
+Seurat_combined$source <- sub("10X_","",Seurat_combined$orig.ident)
+Seurat_combined$source[Seurat_combined$orig.ident %in% c("10X177","10X178","10X298")] <- "Braun_V3"
+Seurat_combined$source[!Seurat_combined$orig.ident %in% c("10X177","10X178","10X298","10X_multiome","10X_scRNA")] <- "Braun_V2"
+Seurat_combined$age <- Seurat_combined$orig.ident
+Seurat_combined$age[Seurat_combined$orig.ident %in% c("10X177","10X178")] <- "CS15"
+Seurat_combined$age[Seurat_combined$orig.ident %in% c("10X298")] <- "CS16"
+Seurat_combined$age[Seurat_combined$orig.ident %in% c("10X118")] <- "CS19"
+Seurat_combined$age[Seurat_combined$orig.ident %in% c("10X154","10X152")] <- "CS19"
+Seurat_combined$age[Seurat_combined$orig.ident %in% c("10X111","10X112")] <- "CS21"
+```
+
+```{r}
+# clean up
+save(Seurat_combined, file="./data_rda/Script2/Seurat_combined.rda")
+rm(ol_genes, counts_multiome, counts_scRNA, counts_Braun, counts_Braun_V2, counts_Braun_V3, Seurat_Braun_V2, Seurat_Braun_V3, Seurat_multiome, Seurat_scRNA)
+```
+
+
+## (2) layer integration
+Tutorial: https://satijalab.org/seurat/articles/integration_introduction
+```{r}
+# normalisation -> tpm
+Seurat_combined <- NormalizeData(Seurat_combined)  # normalising each layer
+
+# standard analysis workflow ~ 4 min
+Seurat_combined <- FindVariableFeatures(Seurat_combined, selection.method = "vst", nfeatures = 3000) # usually set as 2000-3000
+Seurat_combined <- ScaleData(Seurat_combined)  # using variable features by default
+Seurat_combined <- RunPCA(Seurat_combined)  # using variable features by default
+
+# UMAP using the optimal number of PCs ~ 2 min
+ElbowPlot(Seurat_combined, ndims = 50)  # elbow = 9, optimal number of PCs = 10
+Seurat_combined <- RunUMAP(Seurat_combined, dims = 1:10, reduction = "pca")
+
+# plotting
+DimPlot(Seurat_combined, reduction = "umap", label = FALSE, group.by = c("orig.ident"), shuffle = TRUE, raster = FALSE)
+DimPlot(Seurat_combined, reduction = "umap", label = FALSE, group.by = c("source"), shuffle = TRUE, raster = FALSE)
+```
+
+```{r}
+# integrate layers ~ 8+ hours
+Seurat_combined <- IntegrateLayers(Seurat_combined, method = CCAIntegration, orig.reduction = "pca", new.reduction = "integrated.cca")
+Seurat_combined[["RNA"]] <- JoinLayers(Seurat_combined[["RNA"]]) # 1.5 min
+#save(Seurat_combined, file="./data_rda/Script2/Seurat_combined_processed.rda")
+
+# find neighbours (clustering)
+Seurat_combined <- FindNeighbors(Seurat_combined, reduction = "integrated.cca", dims = 1:30, return.neighbor = TRUE)
+
+# UMAP ~ 30s
+Seurat_combined <- RunUMAP(Seurat_combined, dims = 1:30, reduction = "integrated.cca")
+
+# plotting
+DimPlot(Seurat_combined, reduction = "umap", label = FALSE, group.by = c("orig.ident"), shuffle = TRUE)
+DimPlot(Seurat_combined, reduction = "umap", label = FALSE, group.by = c("source"), order = c("mine","Braun"))
+DimPlot(Seurat_combined, reduction = "umap", label = FALSE, group.by = c("age"), order = unique(Seurat_combined$age))
+DimPlot(Seurat_combined[,Seurat_combined$age%in%c("CS16","10X_multiome")],reduction = "umap", label = FALSE, group.by = c("age"), order = unique(Seurat_combined$age))
+DimPlot(Seurat_combined[,Seurat_combined$age%in%c("CS21","10X_scRNA")], reduction = "umap", label = FALSE, group.by = c("age"), order = unique(Seurat_combined$age))
+```
+
+
+## (3) ct annotation
+```{r}
+# add Braun's cell type labels: with correct order!
+Braun_ctAnnot <- read.csv("./data_input/data_Braun_15-21/ctAnnot.csv")
+Braun_ctAnnot$CellID <- sub("'","", sub("b'","",Braun_ctAnnot$CellID))
+Seurat_combined$cell <- names(Seurat_combined@active.ident)
+Seurat_combined$cell[Seurat_combined$source%in%c("multiome")] <- paste0("multiome_", Seurat_combined$cell[Seurat_combined$source%in%c("multiome")])
+Seurat_combined$cell[Seurat_combined$source%in%c("scRNA")] <- paste0("scRNA_", Seurat_combined$cell[Seurat_combined$source%in%c("scRNA")])
+Seurat_combined$cell <- gsub("_[1-9]$","",Seurat_combined$cell)
+
+sum(Seurat_combined$cell[Seurat_combined$source%in%c("Braun_V2","Braun_V3")] %in% Braun_ctAnnot$CellID)
+table(Seurat_combined$cell[Seurat_combined$source%in%c("Braun_V2","Braun_V3")] == Braun_ctAnnot$CellID) # order has changed!
+indices <- match(Braun_ctAnnot$CellID, Seurat_combined$cell[Seurat_combined$source%in%c("Braun_V2","Braun_V3")])
+Braun_ctAnnot <- Braun_ctAnnot[order(indices),]
+table(Seurat_combined$cell[Seurat_combined$source%in%c("Braun_V2","Braun_V3")] == Braun_ctAnnot$CellID) # order has changed!
+rm(indices)
+Seurat_combined$ctAnnot <- NA
+Seurat_combined$ctAnnot[Seurat_combined$source%in%c("Braun_V2","Braun_V3")] <- sub("'","", sub("b'","",Braun_ctAnnot$CellClass))
+rm(Braun_ctAnnot)
+
+# plotting ctAnnot: Braun only ~ 1 min
+DimPlot(Seurat_combined[,Seurat_combined$source%in%c("Braun_V2","Braun_V3")], reduction = "umap", group.by = c("ctAnnot"))
+
+# plotting ctAnnot: Braun + mine (NA)
+DimPlot(Seurat_combined, reduction = "umap", group.by = c("ctAnnot"))
+```
+
+```{r}
+# label transfer, based on 20 neighbour cells ~ 2 min
+labeltransfer <- data.frame()
+for (x in names(Seurat_combined@active.ident)[Seurat_combined$source %in% c("scRNA","multiome")]){
+  neighbors <- TopNeighbors(Seurat_combined@neighbors$RNA.nn, cell = x, n = 20)
+  celltypes <- table(Seurat_combined$ctAnnot[neighbors])
+  label <- names(which.max(celltypes[names(celltypes)!="unknown"]))
+  if (is.null(label)) {label <- "unknown"}
+  labeltransfer <- rbind(labeltransfer, c(x,label))
+  rm(x, neighbors, celltypes, label)
+}
+  
+# cell types
+names(labeltransfer) <- c("cellID", "celltype")
+Seurat_combined$ctAnnot_transfer <- Seurat_combined$ctAnnot
+Seurat_combined$ctAnnot_transfer[Seurat_combined$source %in% c("scRNA","multiome")] <- labeltransfer$celltype
+table(Seurat_combined$ctAnnot_transfer[Seurat_combined$source %in% c("scRNA","multiome")])  # unknown = 854
+
+# assign labels to the still "unknown"cells
+for (x in names(Seurat_combined@active.ident)[Seurat_combined$ctAnnot_transfer=="unknown"]){
+  neighbors <- TopNeighbors(Seurat_combined@neighbors$RNA.nn, cell = x, n = 20)
+  celltypes <- table(Seurat_combined$ctAnnot_transfer[neighbors])
+  label <- names(which.max(celltypes[names(celltypes)!="unknown"]))
+  if (is.null(label)) {label <- "unknown"}
+  Seurat_combined$ctAnnot_transfer[x] <- label
+  rm(x, neighbors, celltypes, label)
+}
+table(Seurat_combined$ctAnnot_transfer) # all cells have labels
+
+rm(labeltransfer)
+```
+
+```{r}
+# plotting ctAnnot: mine only ~ 1 min
+DimPlot(Seurat_combined[,Seurat_combined$source %in% c("scRNA","multiome")], reduction = "umap", group.by = c("ctAnnot_transfer"))
+
+# plotting ctAnnot: Braun + mine
+DimPlot(Seurat_combined, reduction = "umap", group.by = c("ctAnnot_transfer"))
+```
+
+```{r}
+# proportion bar plot: multiome
+proportion <- as.data.frame(table(Seurat_combined$ctAnnot_transfer[Seurat_combined$source=="multiome"]))
+names(proportion) <- c("celltype","nCell")
+proportion$prop <- round(proportion$nCell/sum(proportion$nCell), 3)
+proportion$percent <- paste0(proportion$prop*100, "%")
+ggplot(proportion, aes(x=celltype, y=nCell, fill=celltype)) + 
+  geom_bar(stat = "identity") + guides(fill = FALSE) +
+  geom_text(aes(label = nCell), vjust = -0.3) +
+  geom_text(aes(label = percent), vjust = 1.3) +
+  ggtitle("RNA-based cell type porportion in CS16 forebrain multiome")
+
+# proportion bar plot: scRNA
+proportion <- as.data.frame(table(Seurat_combined$ctAnnot_transfer[Seurat_combined$source=="scRNA"]))
+names(proportion) <- c("celltype","nCell")
+proportion$prop <- round(proportion$nCell/sum(proportion$nCell), 3)
+proportion$percent <- paste0(proportion$prop*100, "%")
+ggplot(proportion, aes(x=celltype, y=nCell, fill=celltype)) + 
+  geom_bar(stat = "identity") + guides(fill = FALSE) +
+  geom_text(aes(label = nCell), vjust = -0.3) +
+  geom_text(aes(label = percent), vjust = 1.3) +
+  ggtitle("RNA-based cell type porportion in CS21 forebrain scRNA")
+
+rm(proportion)
+```
+
+
+## (4) compare to ATAC annot
+### CS16 multiome
+```{r}
+# RNA and ATAC cell type labels
+multiome_ct_RNA <- Seurat_combined$ctAnnot_transfer[Seurat_combined$source=="multiome"]
+names(multiome_ct_RNA) <- sub("-1_1","",names(multiome_ct_RNA))
+multiome_ct_ATAC <- data.frame(ArchR_EHB$cellNames[ArchR_EHB$ID=="FB-16"], ArchR_EHB$ctAnnot_2.0[ArchR_EHB$ID=="FB-16"])
+names(multiome_ct_ATAC) <- c("cellID","ATAC")
+multiome_ct_ATAC$cellID <- sub("-1","",sub("SINAG3#","",multiome_ct_ATAC$cellID))
+sum(names(multiome_ct_RNA) %in% multiome_ct_ATAC$cellID) # 8542 cells overlapping (high quality RNA and ATAC)
+
+# match the two
+multiome_ct_ATAC <- multiome_ct_ATAC[multiome_ct_ATAC$cellID %in% names(multiome_ct_RNA),]
+multiome_ct_RNA <- multiome_ct_RNA[names(multiome_ct_RNA) %in% multiome_ct_ATAC$cellID]
+indices <- match(multiome_ct_ATAC$cellID, names(multiome_ct_RNA))
+multiome_ct_ATAC <- multiome_ct_ATAC[order(indices),]
+table(multiome_ct_ATAC$cellID == names(multiome_ct_RNA))
+multiome_ct_ATAC$RNA <- multiome_ct_RNA
+rm(multiome_ct_RNA, indices)
+```
+
+```{r}
+# Sankey plot
+sankey_df = multiome_ct_ATAC %>% make_long(ATAC, RNA)
+count_df = sankey_df %>% dplyr::group_by(node) %>% tally()  
+df = merge(sankey_df, count_df, by = 'node', all.x = TRUE)
+names(df)[1] <- "celltype"
+ggplot(df, aes(x=x, next_x=next_x, node=celltype, next_node=next_node, fill=celltype)) + 
+  geom_sankey(flow.alpha=0.5, node.color="black", show.legend=T) + theme_minimal() + 
+  theme(axis.title=element_blank(), axis.text.y = element_blank(),
+        axis.ticks=element_blank(), panel.grid = element_blank(), 
+        legend.position = c(0.88, 0.5))
+
+rm(sankey_df, count_df, df, multiome_ct_ATAC)
+```
+
+
+### CS21 scRNA
+```{r}
+# ct proportion in scRNA
+proportion <- as.data.frame(table(Seurat_combined$ctAnnot_transfer[Seurat_combined$source=="scRNA"]))
+sum(proportion$Freq) # 9909 cells
+names(proportion) <- c("celltype","nCell_RNA")
+proportion$RNA <- round(proportion$nCell/sum(proportion$nCell), 3)
+
+# ATAC-based annotation
+proportion2 <- data.frame(table(ArchR_EHB$ctAnnot_2.0[ArchR_EHB$ID == "FB-21"]))
+names(proportion2) <- c("celltype","nCell_ATAC")
+proportion2$ATAC <- proportion2$nCell/sum(proportion2$nCell)
+
+# merge
+proportion <- merge(proportion, proportion2, by = "celltype", all.x = TRUE)
+proportion[is.na(proportion)] <- 0
+proportion <- pivot_longer(proportion[,c(1,3,5)], cols=2:3, names_to = "prediction", values_to = "proportion")
+proportion <- proportion[!proportion$celltype %in% c("Immune","Neural crest"),]
+
+# plotting
+ggplot(proportion, aes(x=celltype, y=proportion, fill=prediction, group=prediction)) + 
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9)) + guides() +
+  geom_text(aes(label = paste0(round(proportion*100,1), "%"), vjust = -0.3), size = 3.5, position = position_dodge(width = 0.9)) +
+  theme(axis.title.x = element_blank())
+
+rm(proportion, proportion2)
+```
+
+
+## (5) save
+```{r}
+save(Seurat_combined, file="./data_rda/Script2/Seurat_combined_processed.rda")
+```
+
+
+
+# 2. scRNA annotation
+## (1) clustering
+```{r}
+# import RNA counts
+counts_multiome <- Read10X(data.dir = "./data_input/data_EHB_multiome")
+counts_multiome <- counts_multiome$`Gene Expression`
+counts_scRNA <- Read10X(data.dir = "./data_input/data_EHB_scRNA")
+
+# make Seurat object
+Seurat_multiome <- CreateSeuratObject(counts_multiome, project = "10X_multiome") # 36601 genes x 12700 cells
+Seurat_scRNA <- CreateSeuratObject(counts_scRNA, project = "10X_scRNA") # 33538 genes x 9909 cells
+rm(counts_multiome, counts_scRNA)
+```
+
+```{r}
+## multiome - CS16
+# processing
+Seurat_multiome <- NormalizeData(Seurat_multiome)  # normalising each layer
+Seurat_multiome <- FindVariableFeatures(Seurat_multiome, selection.method = "vst", nfeatures = 3000) # usually set as 2000-3000
+Seurat_multiome <- ScaleData(Seurat_multiome)  # using variable features by default
+Seurat_multiome <- RunPCA(Seurat_multiome)  # using variable features by default
+
+# clustering and UMAP, with the correct dimensions - 1:10
+ElbowPlot(Seurat_multiome, ndims = 50)  # elbow = 9, optimal number of PCs = 10
+Seurat_multiome <- RunUMAP(Seurat_multiome, dims = 1:10, reduction = "pca")
+Seurat_multiome <- FindNeighbors(Seurat_multiome, dims = 1:10, reduction = "pca")
+Seurat_multiome <- FindClusters(Seurat_multiome, resolution = 0.01, cluster.name = "clusters_0.01")
+Seurat_multiome <- FindClusters(Seurat_multiome, resolution = 0.1, cluster.name = "clusters_0.1")
+Seurat_multiome <- FindClusters(Seurat_multiome, resolution = 0.2, cluster.name = "clusters_0.2")
+Seurat_multiome <- FindClusters(Seurat_multiome, resolution = 0.4, cluster.name = "clusters_0.4")
+Seurat_multiome <- FindClusters(Seurat_multiome, resolution = 0.6, cluster.name = "clusters_0.6")
+Seurat_multiome <- FindClusters(Seurat_multiome, resolution = 0.8, cluster.name = "clusters_0.8")
+Seurat_multiome <- FindClusters(Seurat_multiome, resolution = 1, cluster.name = "clusters_1.0")
+Seurat_multiome <- FindClusters(Seurat_multiome, resolution = 1.2, cluster.name = "clusters_1.2")
+
+# clustree: select the best resolution
+library(clustree)
+clustree_df <- cbind("1", Seurat_multiome$clusters_0.01, Seurat_multiome$clusters_0.1, Seurat_multiome$clusters_0.2, Seurat_multiome$clusters_0.4, Seurat_multiome$clusters_0.6, Seurat_multiome$clusters_0.8, Seurat_multiome$clusters_1.0, Seurat_multiome$clusters_1.2)
+colnames(clustree_df) <- paste0("resolution", c(0,0.01,0.1,0.2,0.4,0.6,0.8,1.0,1.2))
+clustree(clustree_df, prefix = "resolution") +
+  guides(edge_colour = "none", edge_alpha = "none", size = "none") +
+  theme(legend.text = element_text(size = 14), legend.title = element_text(size = 16), legend.position = "right")
+rm(clustree_df)
+
+# UMAP
+DimPlot(Seurat_multiome, reduction = "umap", label = TRUE, group.by = c("clusters_0.6"), shuffle = TRUE, raster = FALSE)
+```
+
+```{r}
+## scRNA - CS21
+# processing
+Seurat_scRNA <- NormalizeData(Seurat_scRNA)  # normalising each layer
+Seurat_scRNA <- FindVariableFeatures(Seurat_scRNA, selection.method = "vst", nfeatures = 3000) # usually set as 2000-3000
+Seurat_scRNA <- ScaleData(Seurat_scRNA)  # using variable features by default
+Seurat_scRNA <- RunPCA(Seurat_scRNA)  # using variable features by default
+
+# clustering and UMAP, with the correct dimensions
+ElbowPlot(Seurat_scRNA, ndims = 50)  # elbow = 13, optimal number of PCs = 13
+Seurat_scRNA <- RunUMAP(Seurat_scRNA, dims = 1:13, reduction = "pca")
+Seurat_scRNA <- FindNeighbors(Seurat_scRNA, dims = 1:13, reduction = "pca")
+Seurat_scRNA <- FindClusters(Seurat_scRNA, resolution = 0.02, cluster.name = "clusters_0.02")
+Seurat_scRNA <- FindClusters(Seurat_scRNA, resolution = 0.1, cluster.name = "clusters_0.1")
+Seurat_scRNA <- FindClusters(Seurat_scRNA, resolution = 0.2, cluster.name = "clusters_0.2")
+Seurat_scRNA <- FindClusters(Seurat_scRNA, resolution = 0.4, cluster.name = "clusters_0.4")
+Seurat_scRNA <- FindClusters(Seurat_scRNA, resolution = 0.6, cluster.name = "clusters_0.6")
+Seurat_scRNA <- FindClusters(Seurat_scRNA, resolution = 0.8, cluster.name = "clusters_0.8")
+Seurat_scRNA <- FindClusters(Seurat_scRNA, resolution = 1, cluster.name = "clusters_1.0")
+Seurat_scRNA <- FindClusters(Seurat_scRNA, resolution = 1.2, cluster.name = "clusters_1.2")
+
+# clustree: select the best resolution
+library(clustree)
+clustree_df <- cbind("1", Seurat_scRNA$clusters_0.02, Seurat_scRNA$clusters_0.1, Seurat_scRNA$clusters_0.2, Seurat_scRNA$clusters_0.4, Seurat_scRNA$clusters_0.6, Seurat_scRNA$clusters_0.8, Seurat_scRNA$clusters_1.0, Seurat_scRNA$clusters_1.2)
+colnames(clustree_df) <- paste0("resolution", c(0,0.02,0.1,0.2,0.4,0.6,0.8,1.0,1.2))
+clustree(clustree_df, prefix = "resolution") +
+  guides(edge_colour = "none", edge_alpha = "none", size = "none") +
+  theme(legend.text = element_text(size = 14), legend.title = element_text(size = 16), legend.position = "right")
+rm(clustree_df)
+
+# UMAP
+DimPlot(Seurat_scRNA, reduction = "umap", label = TRUE, group.by = c("clusters_0.6"), shuffle = TRUE, raster = FALSE)
+```
+
+```{r}
+# nCell per cluster
+View(as.data.frame(table(Seurat_multiome$clusters_0.6)))
+View(as.data.frame(table(Seurat_scRNA$clusters_0.6)))
+```
+
+
+## (2) marker genes
+```{r}
+# differential analysis, returning all genes
+Idents(Seurat_multiome) <- Seurat_multiome$clusters_0.6
+markers_multiome <- FindAllMarkers(Seurat_multiome, test.use = "wilcox", logfc.threshold = -1, return.thresh = 10, min.cells.group = 0, min.pct = 0)
+Idents(Seurat_scRNA) <- Seurat_scRNA$clusters_0.6
+markers_scRNA <- FindAllMarkers(Seurat_scRNA, test.use = "wilcox", logfc.threshold = -1, return.thresh = 10, min.cells.group = 0, min.pct = 0)
+```
+
+### ct marker dot plot
+```{r}
+# cell type marker dot plot
+DotPlot(Seurat_multiome, features = ctMarkers, group.by = "clusters_0.6") + RotatedAxis()
+DotPlot(Seurat_scRNA, features = ctMarkers, group.by = "clusters_0.6") + RotatedAxis()
+```
+
+### ct marker heatmap
+-- CS16 multiome --
+```{r}
+# formatting
+markers_multiome_ct <- markers_multiome[markers_multiome$gene %in% ctMarkers,]
+markers_multiome_ct_FDR <- as.data.frame(pivot_wider(markers_multiome_ct[,5:7], names_from = gene, values_from = p_val_adj))
+row.names(markers_multiome_ct_FDR) <- paste0("C", markers_multiome_ct_FDR$cluster)
+markers_multiome_ct_FDR <- markers_multiome_ct_FDR[,-1]
+markers_multiome_ct_FDR <-markers_multiome_ct_FDR[, match(ctMarkers, colnames(markers_multiome_ct_FDR))]
+
+markers_multiome_ct_log2FC <- as.data.frame(pivot_wider(markers_multiome_ct[,c(2,6:7)], names_from = gene, values_from = avg_log2FC))
+row.names(markers_multiome_ct_log2FC) <- paste0("C", markers_multiome_ct_log2FC$cluster)
+
+markers_multiome_ct_log2FC <- markers_multiome_ct_log2FC[,-1]
+markers_multiome_ct_log2FC <-markers_multiome_ct_log2FC[, match(ctMarkers, colnames(markers_multiome_ct_log2FC))]
+
+# plotting
+df <- as.data.frame(ctMarkers_class)
+row.names(df) <- ctMarkers
+colours <- hcl.colors(9, palette = "Sunset")
+names(colours) <- unique(ctMarkers_class)
+colours <- list(ctMarkers_class = colours)
+
+pheatmap(t(markers_multiome_ct_FDR), 
+         cluster_rows = FALSE, cluster_cols = FALSE,
+         gaps_row = c(6,13,25,31,33,35,38,41),
+         annotation_row = df, annotation_names_row = FALSE,
+         annotation_colors = colours, 
+         breaks = c(seq(0, 0.05, length.out = 50), 1),
+         color = c(hcl.colors(100, "Reds 3")[1:49],"lightgrey"))
+
+pheatmap(t(markers_multiome_ct_log2FC), 
+         cluster_rows = FALSE, cluster_cols = FALSE,
+         gaps_row = c(6,13,25,31,33,35,38,41),
+         annotation_row = df, annotation_names_row = FALSE,
+         annotation_colors = colours, 
+         breaks = c(seq(-1, -0.1, length.out = 50), 0, seq(0.1, 1, length.out = 50)))
+
+rm(df, colours, markers_multiome_ct_FDR, markers_multiome_ct_log2FC)
+```
+
+-- CS21 scRNA --
+```{r}
+# formatting
+markers_scRNA_ct <- markers_scRNA[markers_scRNA$gene %in% ctMarkers,]
+markers_scRNA_ct_FDR <- as.data.frame(pivot_wider(markers_scRNA_ct[,5:7], names_from = gene, values_from = p_val_adj))
+row.names(markers_scRNA_ct_FDR) <- paste0("C", markers_scRNA_ct_FDR$cluster)
+markers_scRNA_ct_FDR <- markers_scRNA_ct_FDR[,-1]
+markers_scRNA_ct_FDR <-markers_scRNA_ct_FDR[, match(ctMarkers, colnames(markers_scRNA_ct_FDR))]
+
+markers_scRNA_ct_log2FC <- as.data.frame(pivot_wider(markers_scRNA_ct[,c(2,6:7)], names_from = gene, values_from = avg_log2FC))
+row.names(markers_scRNA_ct_log2FC) <- paste0("C", markers_scRNA_ct_log2FC$cluster)
+markers_scRNA_ct_log2FC <- markers_scRNA_ct_log2FC[,-1]
+markers_scRNA_ct_log2FC <-markers_scRNA_ct_log2FC[, match(ctMarkers, colnames(markers_scRNA_ct_log2FC))]
+
+# plotting
+df <- as.data.frame(ctMarkers_class)
+row.names(df) <- ctMarkers
+colours <- hcl.colors(9, palette = "Sunset")
+names(colours) <- unique(ctMarkers_class)
+colours <- list(ctMarkers_class = colours)
+
+pheatmap(t(markers_scRNA_ct_FDR), 
+         cluster_rows = FALSE, cluster_cols = FALSE,
+         gaps_row = c(6,13,25,31,33,35,38,41),
+         annotation_row = df, annotation_names_row = FALSE,
+         annotation_colors = colours, 
+         breaks = c(seq(0, 0.05, length.out = 50), 1),
+         color = c(hcl.colors(100, "Reds 3")[1:49],"lightgrey"))
+
+pheatmap(t(markers_scRNA_ct_log2FC), 
+         cluster_rows = FALSE, cluster_cols = FALSE,
+         gaps_row = c(6,13,25,31,33,35,38,41),
+         annotation_row = df, annotation_names_row = FALSE,
+         annotation_colors = colours, 
+         breaks = c(seq(-1, -0.1, length.out = 50), 0, seq(0.1, 1, length.out = 50)))
+
+rm(df, colours, markers_scRNA_ct_FDR, markers_scRNA_ct_log2FC)
+```
+
+
+### marker tables
+-- CS16 multiome --
+```{r}
+# cell type marker table
+ctMarker_table <- data.frame()
+for (x in unique(Seurat_multiome$clusters_0.6)){
+  df1 <- markers_multiome_ct[markers_multiome_ct$p_val_adj < 0.05 & markers_multiome_ct$avg_log2FC > 1, c("cluster","gene")]
+  df2 <- markers_multiome_ct[markers_multiome_ct$p_val_adj < 0.05 & markers_multiome_ct$avg_log2FC > 0.6, c("cluster","gene")]
+  df3 <- markers_multiome_ct[markers_multiome_ct$p_val_adj < 0.05 & markers_multiome_ct$avg_log2FC > 0, c("cluster","gene")]
+  ctMarker_table <- rbind(ctMarker_table, c(x, paste(df1$gene[df1$cluster == x], collapse = " | "), 
+                        paste(df2$gene[df2$cluster == x], collapse = " | "),
+                        paste(df3$gene[df3$cluster == x], collapse = " | ")))
+  rm(x,df1,df2,df3)
+}
+names(ctMarker_table) <- c("cluster", "FDR<0.05 & logFC>1", "FDR<0.05 & logFC>0.6", "FDR<0.05 & logFC>0")
+ctMarker_table$cluster <- as.numeric(ctMarker_table$cluster)
+
+# cluster marker table: top 5 - (1) any genes, (2) TFs
+clusterMarker_table <- data.frame()
+for (x in unique(Seurat_multiome$clusters_0.6)){
+  clusterMarker_table <- rbind(clusterMarker_table, 
+    c(x, paste(markers_multiome$gene[markers_multiome$cluster == x & markers_multiome$avg_log2FC > 0][1:5], collapse = " | "),
+      paste(markers_multiome$gene[markers_multiome$cluster == x & markers_multiome$avg_log2FC > 0 & markers_multiome$gene %in% Human_TF][1:5], collapse = " | ")))
+}
+names(clusterMarker_table) <- c("cluster", "cluster top DAG", "TF top DAG")
+clusterMarker_table$cluster <- as.numeric(clusterMarker_table$cluster)
+
+
+rm(ctMarker_table, clusterMarker_table)
+```
+
+-- CS21 scRNA --
+```{r}
+# cell type marker table
+ctMarker_table <- data.frame()
+for (x in unique(Seurat_scRNA$clusters_0.6)){
+  df1 <- markers_scRNA_ct[markers_scRNA_ct$p_val_adj < 0.05 & markers_scRNA_ct$avg_log2FC > 1, c("cluster","gene")]
+  df2 <- markers_scRNA_ct[markers_scRNA_ct$p_val_adj < 0.05 & markers_scRNA_ct$avg_log2FC > 0.6, c("cluster","gene")]
+  df3 <- markers_scRNA_ct[markers_scRNA_ct$p_val_adj < 0.05 & markers_scRNA_ct$avg_log2FC > 0, c("cluster","gene")]
+  ctMarker_table <- rbind(ctMarker_table, c(x, paste(df1$gene[df1$cluster == x], collapse = " | "), 
+                        paste(df2$gene[df2$cluster == x], collapse = " | "),
+                        paste(df3$gene[df3$cluster == x], collapse = " | ")))
+  rm(x,df1,df2,df3)
+}
+names(ctMarker_table) <- c("cluster", "FDR<0.05 & logFC>1", "FDR<0.05 & logFC>0.6", "FDR<0.05 & logFC>0")
+ctMarker_table$cluster <- as.numeric(ctMarker_table$cluster)
+
+# cluster marker table: top 5 - (1) any genes, (2) TFs
+clusterMarker_table <- data.frame()
+for (x in unique(Seurat_scRNA$clusters_0.6)){
+  clusterMarker_table <- rbind(clusterMarker_table, 
+    c(x, paste(markers_scRNA$gene[markers_scRNA$cluster == x & markers_scRNA$avg_log2FC > 0][1:5], collapse = " | "),
+      paste(markers_scRNA$gene[markers_scRNA$cluster == x & markers_scRNA$avg_log2FC > 0 & markers_scRNA$gene %in% Human_TF][1:5], collapse = " | ")))
+}
+names(clusterMarker_table) <- c("cluster", "cluster top DAG", "TF top DAG")
+clusterMarker_table$cluster <- as.numeric(clusterMarker_table$cluster)
+
+rm(ctMarker_table, clusterMarker_table)
+```
+
+
+## (3) annotations
+### CS16 multiome
+```{r}
+# import annotation
+ctAnnot <- read_excel("./data_output/Script1_ctAnnotation/ctAnnot_RNA.xlsx", sheet = 1)
+ctAnnot <- ctAnnot[,c("Cluster","Cell type")]
+ctAnnot$Cluster <- paste0("C", ctAnnot$Cluster)
+names(ctAnnot)[2] <- "CellType"
+
+# add cell type annotations (C1 must be replaced in the second round)
+Seurat_multiome$clusters_0.6_fix <- paste0("C", Seurat_multiome$clusters_0.6)
+Seurat_multiome$ctAnnot <- stri_replace_all_regex(Seurat_multiome$clusters_0.6_fix,
+                              pattern = ctAnnot$Cluster[!ctAnnot$Cluster %in% c("C1")], 
+                              replacement = ctAnnot$CellType[!ctAnnot$Cluster %in% c("C1")],
+                              vectorize = FALSE)
+Seurat_multiome$ctAnnot <- stri_replace_all_regex(Seurat_multiome$ctAnnot, 
+                              pattern = ctAnnot$Cluster, 
+                              replacement = ctAnnot$CellType,
+                              vectorize = FALSE)
+table(Seurat_multiome$ctAnnot)
+rm(ctAnnot)
+
+# UMAP
+DimPlot(Seurat_multiome, reduction = "umap", group.by = c("ctAnnot"))
+```
+
+```{r}
+# combine three ctAnnot methods
+sum(names(Seurat_multiome$orig.ident) == sub("_1","", names(Seurat_combined$cell[Seurat_combined$orig.ident=="10X_multiome"])))
+df <- cbind(as.data.frame(Seurat_multiome$ctAnnot), as.data.frame(Seurat_combined$ctAnnot_transfer[Seurat_combined$orig.ident=="10X_multiome"]))
+names(df) <- c("RNA_cluster","RNA_atlas")
+df2 <- data.frame(ArchR_EHB$ctAnnot_2.0[ArchR_EHB$ID=="FB-16"])
+rownames(df2) <- sub("SINAG3#","", ArchR_EHB$cellNames[ArchR_EHB$ID=="FB-16"])
+
+# 8542 cells overlapping (high quality RNA and ATAC)
+sum(rownames(df) %in% rownames(df2))
+df2$cell <- rownames(df2)
+df <- df[rownames(df) %in% df2$cell,]
+df2 <- df2[df2$cell %in% rownames(df),]
+df2 <- df2[order(match(df2$cell, rownames(df))),]
+table(df2$cell == rownames(df))
+df$ATAC_cluster <- df2[,1]
+rm(df2)
+
+# save single cell annot
+df <- cbind(ID=row.names(df), df)
+write.csv(df, file = "cellAnnot_multiome.csv", row.names = FALSE, col.names = FALSE, quote = FALSE)
+
+# Sankey plot
+sankey_df = df %>% make_long(ATAC_cluster, RNA_cluster, RNA_atlas)
+count_df = sankey_df %>% dplyr::group_by(node) %>% tally()
+sankey_df = merge(sankey_df, count_df, by = 'node', all.x = TRUE)
+names(sankey_df)[1] <- "celltype"
+ggplot(sankey_df, aes(x=x, next_x=next_x, node=celltype, next_node=next_node, fill=celltype)) + 
+  geom_sankey(flow.alpha=0.5, node.color="black", show.legend=T) + theme_minimal() + 
+  theme(axis.title=element_blank(), axis.text.y = element_blank(), axis.text.x = element_text(size = 12),
+        axis.ticks=element_blank(), panel.grid = element_blank(), legend.position.inside = c(0.93, 0.5)) + 
+  guides(fill = guide_legend(reverse = TRUE))
+
+rm(sankey_df, count_df, df)
+```
+
+```{r}
+# RNA-based annotation, 2 methods
+proportion <- as.data.frame(table(Seurat_combined$ctAnnot_transfer[Seurat_combined$source=="multiome"]))
+names(proportion) <- c("celltype","nCell_RNA_atlas")
+proportion$RNA_atlas <- round(proportion$nCell/sum(proportion$nCell), 3)
+proportion1 <- as.data.frame(table(Seurat_scRNA$ctAnnot))
+names(proportion1) <- c("celltype","nCell_RNA_cluster")
+proportion1$RNA_cluster <- round(proportion1$nCell/sum(proportion1$nCell), 3)
+
+# ATAC-based annotation
+proportion2 <- data.frame(table(ArchR_EHB$ctAnnot_2.0[ArchR_EHB$ID == "FB-16"]))
+names(proportion2) <- c("celltype","nCell_ATAC")
+proportion2$ATAC_cluster <- proportion2$nCell/sum(proportion2$nCell)
+
+# merge
+proportion <- merge(proportion, proportion1, by = "celltype", all.x = TRUE)
+proportion <- merge(proportion, proportion2, by = "celltype", all.x = TRUE)
+proportion[is.na(proportion)] <- 0
+proportion <- pivot_longer(proportion[,c(1,3,5,7)], cols=2:4, names_to = "prediction", values_to = "proportion")
+proportion <- proportion[!proportion$celltype %in% c("Immune","Neural crest"),]
+proportion$percentage <- round(proportion$proportion*100,1)
+proportion$prediction <- factor(proportion$prediction, levels=c("ATAC_cluster","RNA_cluster","RNA_atlas"))
+
+# Bar plot
+ggplot(proportion, aes(x=percentage, y=celltype, fill=celltype)) + 
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9)) + guides() +
+  theme_bw() + xlab("percentage (%)") + ylab("") +
+  facet_wrap(~prediction, nrow = 1) +
+  theme(axis.text.x = element_text(angle=45, hjust = 1, size = 10), 
+        axis.text.y = element_text(size = 10),
+        legend.position = "none")
+
+rm(proportion, proportion1, proportion2)
+```
+
+
+
+### CS21 scRNA
+```{r}
+# import annotation
+ctAnnot <- read_excel("./data_output/Script1_ctAnnotation/ctAnnot_RNA.xlsx", sheet = 2)
+ctAnnot <- ctAnnot[,c("Cluster","Cell type")]
+ctAnnot$Cluster <- paste0("C", ctAnnot$Cluster)
+names(ctAnnot)[2] <- "CellType"
+
+# add cell type annotations (C1 must be replaced in the second round)
+Seurat_scRNA$clusters_0.6_fix <- paste0("C", Seurat_scRNA$clusters_0.6)
+Seurat_scRNA$ctAnnot <- stri_replace_all_regex(Seurat_scRNA$clusters_0.6_fix,
+                              pattern = ctAnnot$Cluster[!ctAnnot$Cluster %in% c("C1","C2")], 
+                              replacement = ctAnnot$CellType[!ctAnnot$Cluster %in% c("C1","C2")],
+                              vectorize = FALSE)
+Seurat_scRNA$ctAnnot <- stri_replace_all_regex(Seurat_scRNA$ctAnnot, 
+                              pattern = ctAnnot$Cluster, 
+                              replacement = ctAnnot$CellType,
+                              vectorize = FALSE)
+table(Seurat_scRNA$ctAnnot)
+rm(ctAnnot)
+
+# UMAP
+DimPlot(Seurat_scRNA, reduction = "umap", group.by = c("ctAnnot"))
+```
+
+```{r}
+# combine two RNA based methods
+sum(names(Seurat_scRNA$orig.ident) == sub("_2","", names(Seurat_combined$cell[Seurat_combined$orig.ident=="10X_scRNA"])))
+df <- cbind(as.data.frame(Seurat_scRNA$ctAnnot), as.data.frame(Seurat_combined$ctAnnot_transfer[Seurat_combined$orig.ident=="10X_scRNA"]))
+names(df) <- c("RNA_cluster","RNA_atlas")
+
+# Sankey plot
+sankey_df = df %>% make_long(RNA_cluster, RNA_atlas)
+count_df = sankey_df %>% dplyr::group_by(node) %>% tally()
+sankey_df = merge(sankey_df, count_df, by = 'node', all.x = TRUE)
+names(sankey_df)[1] <- "celltype"
+ggplot(sankey_df, aes(x=x, next_x=next_x, node=celltype, next_node=next_node, fill=celltype)) + 
+  geom_sankey(flow.alpha=0.5, node.color="black", show.legend=T) + theme_minimal() + 
+  theme(axis.title=element_blank(), axis.text.y = element_blank(),
+        axis.ticks=element_blank(), panel.grid = element_blank(), 
+        legend.position = c(0.88, 0.5)) + 
+  guides(fill = guide_legend(reverse = TRUE))
+
+rm(sankey_df, count_df, df)
+```
+
+```{r}
+# RNA-based annotation, 2 methods
+proportion <- as.data.frame(table(Seurat_combined$ctAnnot_transfer[Seurat_combined$source=="scRNA"]))
+names(proportion) <- c("celltype","nCell_RNA_atlas")
+proportion$RNA_atlas <- round(proportion$nCell/sum(proportion$nCell), 3)
+proportion1 <- as.data.frame(table(Seurat_scRNA$ctAnnot))
+names(proportion1) <- c("celltype","nCell_RNA_cluster")
+proportion1$RNA_cluster <- round(proportion1$nCell/sum(proportion1$nCell), 3)
+
+# ATAC-based annotation
+proportion2 <- data.frame(table(ArchR_EHB$ctAnnot_2.0[ArchR_EHB$ID == "FB-21"]))
+names(proportion2) <- c("celltype","nCell_ATAC")
+proportion2$ATAC_cluster <- proportion2$nCell/sum(proportion2$nCell)
+
+# merge
+proportion <- merge(proportion, proportion1, by = "celltype", all.x = TRUE)
+proportion <- merge(proportion, proportion2, by = "celltype", all.x = TRUE)
+proportion[is.na(proportion)] <- 0
+proportion <- pivot_longer(proportion[,c(1,3,5,7)], cols=2:4, names_to = "prediction", values_to = "proportion")
+proportion <- proportion[!proportion$celltype %in% c("Immune","Neural crest"),]
+proportion$percentage <- round(proportion$proportion*100,1)
+proportion$prediction <- factor(proportion$prediction, levels=c("ATAC_cluster","RNA_cluster","RNA_atlas"))
+
+# Bar plot
+ggplot(proportion, aes(x=percentage, y=celltype, fill=celltype)) + 
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9)) + guides() +
+  theme_bw() + xlab("percentage (%)") + ylab("") +
+  facet_wrap(~prediction, nrow = 1) +
+  theme(axis.text.x = element_text(angle=45, hjust = 1, size = 10), 
+        axis.text.y = element_text(size = 10),
+        legend.position = "none")
+
+rm(proportion, proportion1, proportion2)
+```
+
+
+## (4) save
+```{r}
+save(Seurat_multiome, Seurat_scRNA, file="./data_rda/Script2/Seurat_RNAx2.rda")
+save(markers_multiome, markers_multiome_ct, markers_multiome_ct_FDR, markers_multiome_ct_log2FC,
+     markers_scRNA, markers_scRNA_ct, file = "./data_rda/Script2/scRNA_Annotation.rda")
+rm(Seurat_multiome, Seurat_scRNA, markers_multiome, markers_multiome_ct, markers_multiome_ct_FDR, markers_multiome_ct_log2FC, markers_scRNA, markers_scRNA_ct)
+```
+
