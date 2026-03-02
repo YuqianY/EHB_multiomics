@@ -25,7 +25,7 @@ colour <- c(Neuron="#3ee2ff", Neuroblast="#00cfff","Neuronal IPC" = "#40a1ff", '
 
 
 # 1. Forebrain vs Hindbrain
-```{r}
+```{r
 # add forebrain and hindbrain
 ArchR_EHB$Region_FvH <- ArchR_EHB$Region
 ArchR_EHB$Region_FvH[ArchR_EHB$Region_FvH!="Forebrain"] <- "Hindbrain"
@@ -36,7 +36,7 @@ table(ArchR_EHB_5ct$ctAnnot_2.0)
 ```
 
 ## (1) bulk DA
-```{r}
+```{r
 table(ArchR_EHB_5ct$Region_FvH)
 
 # down-sample to match the statistical power for comparing by age! (3000)
@@ -81,7 +81,7 @@ rm(allpeaks, top, FBvHB_bulk_down, FBvHB_bulk_up)
 
 
 ## (2) split age DA
-```{r}
+```{r
 # down-sample: lowest = 2076, downsample to 3000
 for (x in unique(ArchR_EHB_5ct$Region_FvH)){
   print(x)
@@ -167,11 +167,11 @@ for (x in c(1:2)){
 }
 p1 <- p1 + theme(axis.title.x = element_blank(), legend.position = "none")
 
-png("./ArchR_EHB/Plots/Script3/grid_volcano_FBvHB_5ct.png", width = 2000, height = 1200, res = 160)
+png("./ArchR_EHB/Plots/Script3/grid_volcano_FBvHB_5ct.png", width = 2400, height = 1000, res = 160)
 p1 + p2 + plot_layout(guides = "collect")
 dev.off()
 
-rm(p1, p2, allpeaks)
+#rm(p1, p2, allpeaks)
 ```
 
 
@@ -191,7 +191,9 @@ p2 <- ggVennDiagram(DAG_down, label = "count") +
   scale_fill_gradient(low="#b2f7be",high = "#02b51f") + 
   ggtitle("Hindbrain > Forebrain") +
   theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 16))
+```
 
+```{r}
 png("./ArchR_EHB/Plots/Script3/grid_Venn_FBvHB_5ct.png", width = 2000, height = 1000, res = 230)
 p1 + p2
 dev.off()
@@ -200,7 +202,7 @@ rm(p1, p2)
 ```
 
 
-### main fig - STRING network
+### fig - STRING network
 ```{r}
 # get DAGs that are found in all five ages
 DAG_up_overlap <- Reduce(intersect, DAG_up)
@@ -208,7 +210,7 @@ DAG_down_overlap <- Reduce(intersect, DAG_down)
 ```
 
 Step 1: prepare gene lists
-```{r}
+```{r
 # up-regulated: change C21orf62 to EPCIP
 DAG_up_overlap <- sub("C21orf62","EPCIP",DAG_up_overlap)
 write.table(DAG_up_overlap, "./data_output/Script3_STRING/DAG_up_genes.txt", row.names = FALSE, col.names = FALSE, sep = '\t', quote=FALSE)
@@ -228,7 +230,7 @@ DAG_down_mart <- read.delim("./data_output/Script3_STRING/DAG_down_mart.txt")
 ```
 
 
-### main/supp fig - heatmap
+### supp fig - heatmap
 ```{r}
 # plotting: FB > HB
 DAG_up_overlap <- sub("EPCIP","C21orf62",DAG_up_overlap)
@@ -250,9 +252,11 @@ names(df) <- "type"
 df$type <- sub("_coding", "",df$type)
 
 
-# correct gene name
+# correct gene name and age order
 names(heatmap_data)[names(heatmap_data)=="C21orf62"] <- "EPCIP"
+heatmap_data <- heatmap_data[c("CS14","CS16","CS17","CS20","CS21"),]
 
+# plot
 Heatmap(t(heatmap_data), cluster_columns = FALSE, cluster_rows = TRUE, name = "log2(FC)",
         column_title = "Forebrain > Hindbrain", column_title_gp = gpar(fontface = "bold", fontsize = 15),
         col = circlize::colorRamp2(seq(min(heatmap_data), max(heatmap_data), length.out = 3), c("#faeec0", "#ffc800", "#ffa200")),
@@ -276,11 +280,16 @@ heatmap_data <- heatmap_data[,2:ncol(heatmap_data)]
 df <- DAG_down_mart[!is.na(as.numeric(DAG_down_mart$Chromosome.scaffold.name)),]
 df <- data.frame(Gene.type = df[, "Gene.type"], row.names = df[, "Gene.name"])
 names(df) <- "type"
+df$type <- sub("_coding", "",df$type)
 
-Heatmap(t(heatmap_data), cluster_columns = FALSE, cluster_rows = TRUE, name = "log2(fold change)",
+# correct age order
+heatmap_data <- heatmap_data[c("CS14","CS16","CS17","CS20","CS21"),]
+
+# plot
+Heatmap(t(heatmap_data), cluster_columns = FALSE, cluster_rows = TRUE, name = "log2(FC)",
         column_title = "Hindbrain > Forebrain", column_title_gp = gpar(fontface = "bold", fontsize = 15),
         col = circlize::colorRamp2(seq(min(heatmap_data), max(heatmap_data), length.out = 3), c("#baf5c4","#53CC67","#008216")),
-        left_annotation = rowAnnotation(type = df[colnames(heatmap_data),], col = list(type = c("miRNA"="#CCCCFF", "lncRNA"="#6495ED", "protein_coding"="#9FE2BF"))))
+        left_annotation = rowAnnotation(type = df[colnames(heatmap_data),], col = list(type = c("miRNA"="#CCCCFF", "lncRNA"="#6495ED", "protein"="#9FE2BF"))))
 ```
 
 ```{r}
@@ -516,6 +525,7 @@ save(FBvHB_bulk, FBvHB_splitAge, FBvHB_splitCT, FBvHB_GO_full, FBvHB_GO_merged, 
 
 
 
+# ------------------------
 # 2. ct-spc features
 ## (1) ct-specifc [genes]
 ```{r}
@@ -598,7 +608,7 @@ trial@result <- result
 rm(result)
 
 # tree plot
-semData <- godata('org.Hs.eg.db', keytype = "ENTREZID", ont = "BP", computeIC = TRUE) # the same for BP/MF/CC
+#semData <- godata('org.Hs.eg.db', keytype = "ENTREZID", ont = "BP", computeIC = TRUE) # the same for BP/MF/CC
 GO <- pairwise_termsim(trial, method = "Wang", semData = semData)   # using the Wang similarity
 p <- treeplot(GO, showCategory=nrow(GO), fontsize=4, cluster.params = list(n = 7), cex_category = 0) # look at the dendrogram and manually set a number for ncluster
 p
@@ -728,7 +738,7 @@ set.seed(100)
 addArchRThreads(4)
 library(BSgenome.Hsapiens.UCSC.hg38)
 
-# create pseudobulks ~ 7.5 min
+# create pseudobulks ~ 7.5 min [MacBook M4, 4 threads, more threads is slower!]
 ArchR_EHB <- addGroupCoverages(ArchR_EHB, groupBy = "ctAnnot_2.0", force = TRUE)
 save(ArchR_EHB, EHB_10x_samples, ctMarkers, ctMarkers_class, file = "./data_rda/Script3/ArchR_Project.rda")
 ```
@@ -737,11 +747,11 @@ save(ArchR_EHB, EHB_10x_samples, ctMarkers, ctMarkers_class, file = "./data_rda/
 motifPositions <- getPositions(ArchR_EHB)  # all 870 motifs in ArchR
 names(motifPositions) <- sub("_.*","",names(motifPositions))
 
-## compute footprints for all ~ 45 min
+## compute footprints for all ~ 45 min [MacBook M4, 4 threads]
 set.seed(100)
 addArchRThreads(4)
 library(BSgenome)
-# Before running, make sure the directory for pseudobulks are correct! Otherwise it gets an error after an hour!
+# Before running, make sure the directory for pseudobulks are correct! Otherwise it hits an error after an hour!
 seFoot <- getFootprints(ArchR_EHB, positions = motifPositions, groupBy = "ctAnnot_2.0")
 
 save(seFoot, file = "./data_rda/Script3/seFoot.rda")
@@ -762,7 +772,7 @@ ArchR_EHB_5ct@peakAnnotation
 # add background peaks
 ArchR_EHB_5ct <- addBgdPeaks(ArchR_EHB_5ct)
 
-# compute per-cell deviations using chromVAR, add to arrow files ~ 190 min
+# compute per-cell deviations using chromVAR, add to arrow files ~ 190 min [MacBook M4, 2 threads]
 addArchRThreads(2)
 ArchR_EHB_5ct <- addDeviationsMatrix(ArchR_EHB_5ct, peakAnnotation = "Motif", force = TRUE)
 save(ArchR_EHB_5ct, file = "./data_rda/Script3/ArchR_EHB_5ct.rda")
@@ -937,7 +947,7 @@ for (i in names(p)){
 }
 ```
 
-```{r}
+```{r
 # selecting the best marker motifs for each cell type ~ 1 min
 grid <- list()
 for (x in unique(FilterList_overlap_top10$group_name)){
@@ -968,7 +978,7 @@ png("./ArchR_EHB/Plots/Script3/grid_chromVAR_ridges.png", width = 2000, height =
 wrap_plots(p1, ncol = length(p1))
 dev.off()
 
-rm(p, p1, grid, markerMotifs)
+#rm(p, p1, grid, markerMotifs)
 ```
 
 
@@ -1242,7 +1252,7 @@ chromVAR_summary <- pivot_longer(chromVAR_summary, cols = 1:(ncol(chromVAR_summa
 heatmap_summary <- merge(motif_enrichScore, geneScore_summary, by = c("gene","celltype"))
 heatmap_summary <- merge(heatmap_summary, chromVAR_summary, by = c("gene","celltype"))
 
-save(heatmap_summary, file = "./data_rda/Script3/heatmap_summary.rda")
+#save(heatmap_summary, file = "./data_rda/Script3/heatmap_summary.rda")
 ```
 
 ```{r}
@@ -1290,6 +1300,7 @@ rm(p, dendro, heatmap_summary, geneScore_summary, motif_enrichScore, chromVAR_su
 
 
 
+# ------------------------
 # 4. ctRegion features
 ## (1) ctRegion-specific [genes]
 ```{r}
@@ -1340,7 +1351,7 @@ load("./data_rda/Script3/ArchR_EHB_5ct.rda")
 ## (1) Filters
 
 Filter 1 - motif enrichment
-```{r}
+```{r
 # ctRegion-spc-peak-enriched TFs
 df1 <- ctMarkerMotifs_ctRegion@assays@data$mlog10Padj
 row.names(df1) <- sub("_.*","",row.names(df1))
@@ -1356,7 +1367,7 @@ rm(x, df1, df2)
 ```
 
 Filter 2 - motif accessibility (chromVAR)
-```{r}
+```{r
 # ct-spc genes for each ct
 markerMotifs <- data.frame(getMarkers(ctMarkerMotifs_ctRegion_chromVAR, cutOff = "FDR <= 0.01 & MeanDiff >= 0.5"))
 
@@ -1369,7 +1380,7 @@ rm(x, markerMotifs)
 ```
 
 Filter 3 - TF accessibility (gene score)
-```{r}
+```{r
 # ct-spc genes for each ct
 markerGenes <- data.frame(getMarkers(ctMarkerGenes_ctRegion, cutOff = "FDR <= 0.01 & Log2FC >= 0.6"))
 
@@ -1384,7 +1395,7 @@ for (x in unique(markerGenes$group_name)){
 rm(x, markerGenes)
 ```
 
-```{r}
+```{r
 save(FilterList_1_motif_ctRegion, FilterList_2_chromVAR_ctRegion, FilterList_3_genescore_ctRegion, 
      file = "./data_rda/Script3/Motif_Filterlists_ctRg.rda")
 ```
@@ -1444,7 +1455,7 @@ FilterList_overlap_top10_ctRegion <- na.omit(FilterList_overlap_top10_ctRegion)
 rm(markerMotifs, ctMarkerMotifs_ctRegion_chromVAR)
 ```
 
-```{r}
+```{r
 # plot chromVAR z score for top 10 motifs per ct
 motifs <- unique(FilterList_overlap_top10_ctRegion$name)
 markerMotifs <- getFeatures(ArchR_EHB_5ct, select = paste(paste0(motifs,"_"), collapse="|"), useMatrix = "MotifMatrix")
@@ -1459,7 +1470,7 @@ for (i in names(p)){
 }
 ```
 
-```{r}
+```{r
 # select motifs from dot plot for TFs - check that each has known regulatory functions in neurogenesis / gliogenesis
 select <- c("Neuron"="POU4F2", "Neuroblast"="NHLH1", "Neuronal IPC"="OTX2", "Radial glia"="SOX9", "Glioblast"="NFIX")
 group_order <- c("Neuron_FB","Neuron_CP","Neuron_MD","Neuroblast_FB","Neuroblast_CP","Neuroblast_MD",
@@ -1525,14 +1536,14 @@ for (i in names(select)){
     p[[i]] <- p[[i]] + theme(axis.text.y = element_blank())
   }
   
-  p[[i]] <- p[[i]] + xlab("") + ylab("") + 
+  p[[i]] <- p[[i]] + xlab("chromVAR deviation z score") + ylab("") + 
     ggtitle(paste0(select[i], ", ", i)) + theme(plot.margin = unit(c(0, 0, 0, 0), "cm"))
   
   rm(i)
 }
 
 png("./ArchR_EHB/Plots/Script3/grid_chromVAR_ridges_ctRegionAge.png", width = 1500, height = 800, res = 200)
-wrap_plots(p[c("Neuron", "Neuroblast", "Neuronal IPC", "Radial glia", "Glioblast")], ncol = length(p))
+wrap_plots(p[c("Neuron", "Neuroblast", "Neuronal IPC", "Radial glia", "Glioblast")], ncol = length(p), axis_titles = "collect_x")
 dev.off()
 ```
 
@@ -1543,7 +1554,7 @@ rm(p, select, markerMotifs, colour_AgRg, group_order)
 
 
 ### main fig - 3-layer heatmap
-```{r}
+```{r
 # TFs that have gene score
 # layer 1 - motif enrichment score
 motif_enrichScore <- ctMarkerMotifs_ctRegion@assays@data$Enrichment
@@ -1646,8 +1657,7 @@ rm(p, dendro, heatmap_summary_ctRegion, geneScore_summary, motif_enrichScore, ch
 ```
 
 
-
-# 6. Save project
+# Save ArchR project
 ```{r}
 save(ArchR_EHB_5ct, ArchR_EHB, EHB_10x_samples, ctMarkers, ctMarkers_class, file = "./data_rda/Script3/ArchR_Project.rda")
 ```

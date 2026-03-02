@@ -28,7 +28,7 @@ Prepare LDSC folders
    
 ## (1) prepare BED
 ```{r}
-# get cell type specific peaks
+# get cell type specific peaks ~ ???  sec
 ctMarkerPeaks_7ct <- getMarkerFeatures(ArchR_EHB, useMatrix = "PeakMatrix", groupBy = "ctAnnot_2.0", 
                                             bias = c("TSSEnrichment", "log10(nFrags)"), testMethod = "wilcoxon", k = 100, maxCells = 1000)
 save(ctMarkerPeaks_7ct, file="./data_rda/Script4/ctMarkerPeaks_7ct.rda")
@@ -67,6 +67,7 @@ python ldsc-master/munge_sumstats.py --sumstats ${data}/GWAS/sumstats_raw/pgc-md
 python ldsc-master/munge_sumstats.py --sumstats ${data}/GWAS/sumstats_raw/anxiety.meta.full.cc.tbl.tsv --merge-alleles w_hm3.snplist  --out ${data}/GWAS/sumstats/GWAS_ANX --a1-inc
 python ldsc-master/munge_sumstats.py --sumstats ${data}/GWAS/sumstats_raw/g4_GWAS_Sumstats_Cleaned.txt --merge-alleles w_hm3.snplist  --out ${data}/GWAS/sumstats/GWAS_cogG4 --a1-inc
 python ldsc-master/munge_sumstats.py --sumstats ${data}/GWAS/sumstats_raw/g6_GWAS_Sumstats_Cleaned.txt --merge-alleles w_hm3.snplist  --out ${data}/GWAS/sumstats/GWAS_cogG6 --a1-inc
+<<<
 ```
 
 
@@ -77,7 +78,7 @@ cd $HOME/Downloads/project_EHB/data_input/LDSC
 celltypes=("Erythroblast" "Fibroblast" "Glioblast" "Neuroblast" "Neuron" "nIPC" "RG")
 export data=$HOME/Downloads/project_EHB/data_input/LDSC_input
 
-# automated parallel loop ~ 1.5 min
+# automated parallel loop ~ 1.5 min [MacBook M4, 7 in parallel, CPU load ~ 80%]
 parallel -j 7 --bar '
   cell={1}
   for bimFile in plink_files/*.bim; do
@@ -97,7 +98,7 @@ Tutorial: https://github.com/bulik/ldsc/wiki/LD-Score-Estimation-Tutorial
 This step summarizes *LD structure* in my data, and is *independent* of the GWAS result
 The output MUST be stored in the same folder as the annot files!!
 ```{bash}
-# automated parallel loop ~ 70 min
+# automated parallel loop ~ 70 min [MacBook M4, 8 in parallel]
 ls ${data}/annot/*.annot | parallel -j 8 --bar '
   annotFile={}
   chr=$(basename "$annotFile" | cut -d "." -f 2)
@@ -118,7 +119,7 @@ ls ${data}/annot/*.annot | parallel -j 8 --bar '
 Tutorial: https://github.com/bulik/ldsc/wiki/Partitioned-Heritability#cell-type-group-analysis
           "Cell-type group analysis"
 ```{bash}
-# automated parallel loop for running LD baseline model ~ 70 min
+# automated parallel loop for running LD baseline model ~ 70 min [MacBook M4, 3 in parallel]
 ls ${data}/GWAS/sumstats/*.sumstats.gz | parallel -j 3 --bar '
   sumstats={}
   study=$(basename $sumstats | cut -d '/' -f 9 | cut -d '_' -f 2 | cut -d '.' -f 1)
@@ -209,7 +210,7 @@ gridExtra::grid.arrange(grobs = p, ncol = 6, left = textGrob("Enrichment (prop. 
                                                              rot = 90, gp = gpar(fontsize = 12)))
 dev.off()
 
-rm(x, p)
+#rm(x, p)
 ```
 
 ## (3) save LDSC
@@ -403,7 +404,7 @@ Setup
 cd $HOME/Downloads/project_EHB/data_input/data_COJO/gcta-1.94.4-macOS-arm64
 export PLINK=$HOME/Downloads/project_EHB/data_input/LDSC/plink_files
 
-# run COJO for GWAS studies with moderate power (p cutoff = 1e-6) ~ 15-20 min
+# run COJO for GWAS studies with moderate power (p cutoff = 1e-6) ~ 15-20 min [MacBook M4, 8 in parallel]
 ls ../input/*.ma | parallel -j 8 --bar '
   sumstats={}
   disease=$(basename $sumstats | cut -d "/" -f 3 | cut -d "." -f 1)
@@ -415,7 +416,7 @@ ls ../input/*.ma | parallel -j 8 --bar '
 ```
 
 ```{bash}
-# run COJO for GWAS studies with higher power (lower p cutoff = 1e-8) ~ 11 min
+# run COJO for GWAS studies with higher power (lower p cutoff = 1e-8) ~ 11 min [MacBook M4, 3 in parallel]
 ls ../input/higher/*.ma | parallel -j 3 --bar '
   sumstats={}
   disease=$(basename $sumstats | cut -d "/" -f 4 | cut -d "." -f 1)
@@ -597,7 +598,7 @@ gc()
 ```
 
 ```{r}
-# run SCAVENGE ~ 3 min
+# run SCAVENGE ~ 3 min [MacBook M4]
 set.seed(100)
 mutual_knn_all <- list()
 mono_mat_all <- list()
@@ -631,6 +632,97 @@ for (x in list.files("./data_input/SCAVENGE_input", full.names = TRUE)){
   TRS <- TRS * scale_factor
   mono_mat_all[[disease]] <- data.frame(z_score_mat[!omit_idx, ], seed_idx = seed_idx[!omit_idx], np_score, TRS)
   rm(x, disease, z_score_mat, seed_idx, scale_factor, np_score, omit_idx, TRS)
+}
+```
+
+
+### [-] ct-spc peaks - 7ct
+The SCAVENGE paper explicitly demonstrated analyses using cell-type-specific peaks.
+"To increase the sensitivity and specificity of SCAVENGE to detect trait enrichments, we used cell-type-specific peaks derived from the ArchR marker peak analysis."
+
+/#### peak matrix
+```{r
+# load data
+load("./data_rda/Script4/ctMarkerPeaks_7ct.rda")
+ctPeaks <- getMarkers(ctMarkerPeaks_7ct, cutOff = "FDR <= 0.01 & Log2FC >= 0.6") # use a relaxed filter to make sure downstream runs smoothly!
+load("./data_rda/Script1/PeakMatrix.rda")
+PeakMatrix # 526880 peaks
+peaks <- rowRanges(PeakMatrix)
+
+# find overlap
+overlap <- list()
+for (x in names(ctPeaks)){
+  peaks_ct <- GRanges(seqnames = ctPeaks[[x]]$seqnames, ranges = IRanges(start = ctPeaks[[x]]$start, end = ctPeaks[[x]]$end))
+  overlap[[x]] <- which(peaks %in% peaks_ct)  
+  rm(x, peaks_ct)
+}
+overlap <- as.vector(unlist(overlap))
+overlap <- unique(overlap)
+
+# filter peak matrix: number of peaks is correct
+PeakMatrix_ct <- PeakMatrix[overlap, ]
+dim(PeakMatrix_ct) 
+# 154622 peaks, FDR <= 0.05, skip permutation: ANX, cogG4, cogG6 (lowest fine-mapping significant SNP count)
+# 103369 peaks, FDR <= 0.05 & logFC >= 0.6, skip permutation: ANX, BP, cogG4, cogG6
+# 62437 peaks, FDR <= 0.01 & logFC >= 0.6 (true ct-spc), skip permutation: ANX, BP, cogG4, cogG6, SCZ
+
+# clean up
+rm(ctPeaks, PeakMatrix, ctMarkerPeaks_7ct, peaks, overlap)
+gc()
+```
+
+/#### run SCAVENGE
+```{r
+# make SummarizedExperiment: 62437 peaks, 75136 cells
+SE_ct <- SummarizedExperiment(assays = list(counts = assay(PeakMatrix_ct)), 
+                              rowRanges = rowRanges(PeakMatrix_ct), 
+                              colData = DataFrame(names = colnames(assay(PeakMatrix_ct))))
+assayNames(SE_ct) <- "counts"
+SE_ct <- addGCBias(SE_ct, genome = BSgenome.Hsapiens.UCSC.hg38)
+SE_ct_bg <- getBackgroundPeaks(SE_ct, niterations=200)
+rm(PeakMatrix_ct)
+gc()
+```
+
+```{r
+# run SCAVENGE ~ 1 min [MacBook M4]
+set.seed(100)
+mutual_knn_ct <- list()
+mono_mat_ct <- list()
+
+for (x in list.files("./data_input/SCAVENGE_input", full.names = TRUE)){
+  disease <- sub(".bed","",sub("./data_input/SCAVENGE_input/","",x))
+  print(disease)
+  
+  # gchromVAR analysis
+  print("gchromVAR analysis...")
+  SNP_PP <- importBedScore(rowRanges(SE_ct), x, colidx = 5)
+  SE_ct_dev <- computeWeightedDeviations(SE_ct, weights = SNP_PP, background_peaks = SE_ct_bg) # may generate NA
+  rm(SNP_PP)
+  
+  # processing z score
+  # - filter out NA z score, otherwise seedindex() returns "missing value where TRUE/FALSE needed"
+  # - remove infinite z score, otherwise scale-factor = Inf
+  print("processing z score...")
+  z_score_mat <- na.omit(data.frame(colData(SE_ct), z_score=t(assays(SE_ct_dev)[["z"]]) |> c()))
+  z_score_mat <- z_score_mat[is.finite(z_score_mat$z_score),]
+  seed_idx <- seedindex(z_score = z_score_mat$z_score, percent_cut = 0.05) # using top 5% cells as seed
+  scale_factor <- cal_scalefactor(z_score = z_score_mat$z_score, percent_cut = 0.01)
+  rm(SE_ct_dev)
+  
+  # network propagation
+  print("network propagation...")
+  np_score <- randomWalk_sparse(intM = mutual_knn, queryCells = rownames(mutual_knn)[seed_idx], gamma = 0.05) 
+  omit_idx <- np_score==0
+  mutual_knn_ct[[disease]] <- mutual_knn[!omit_idx, !omit_idx]
+  np_score <- np_score[!omit_idx]
+  TRS <- capOutlierQuantile(x = np_score, q_ceiling = 0.95) |> max_min_scale()
+  TRS <- TRS * scale_factor
+  mono_mat_ct[[disease]] <- data.frame(z_score_mat[!omit_idx, ], seed_idx = seed_idx[!omit_idx], np_score, TRS)
+  
+  rm(x, disease, z_score_mat, seed_idx, scale_factor, np_score, omit_idx, TRS)
+  
+  gc()
 }
 ```
 
@@ -683,7 +775,7 @@ gc()
 ```
 
 ```{r}
-# run SCAVENGE ~ 1 min
+# run SCAVENGE ~ 1 min [MacBook M4]
 set.seed(100)
 mutual_knn_ct <- list()
 mono_mat_ct <- list()
@@ -909,15 +1001,15 @@ for (x in names(mono_mat_all)){
 }
 ```
 
-```{r}
-# sanity check: run each code for 2 seconds to make sure they can initiate properly
+```{r
+# pre-checking: run each code for 2 seconds to make sure they can initiate properly
 x <- names(mono_mat_all)[11]
 mono_permu <- get_sigcell_simple(mutual_knn_all[[x]], mono_mat_all[[x]]$seed_idx, mono_mat_all[[x]]$np_score, 
                                    permutation_times=1000, true_cell_significance=0.001, rw_gamma=0.05)
 ```
 
 ```{r}
-# run permutation ~ 100 min
+# run permutation ~ 100 min [MacBook M4, 4 in parallel]
 mono_mat_permu_all <- pbmclapply(names(mono_mat_all), function(x) {
   mono_permu <- get_sigcell_simple(mutual_knn_all[[x]], mono_mat_all[[x]]$seed_idx, mono_mat_all[[x]]$np_score, 
                                    permutation_times = 1000, true_cell_significance = 0.001, rw_gamma = 0.05)
@@ -939,15 +1031,15 @@ for (x in names(mono_mat_ct)){
 select
 ```
 
-```{r}
-# sanity check: run each code for 2 seconds to make sure they can initiate properly
+```{r
+# pre-checking: run each code for 2 seconds to make sure they can initiate properly
 x <- names(mono_mat_all)[11]
 mono_permu <- get_sigcell_simple(mutual_knn_ct[[x]], mono_mat_ct[[x]]$seed_idx, mono_mat_ct[[x]]$np_score, 
                                    permutation_times=1000, true_cell_significance=0.001, rw_gamma=0.05)
 ```
 
 ```{r}
-# run permutation ~ 70 min
+# run permutation ~ 70 min [MacBook M4, 8 in parallel]
 mono_mat_permu_ct <- pbmclapply(select, function(x) {
   mono_permu <- get_sigcell_simple(mutual_knn_ct[[x]], mono_mat_ct[[x]]$seed_idx, mono_mat_ct[[x]]$np_score, 
                                    permutation_times = 1000, true_cell_significance = 0.001, rw_gamma = 0.05)
@@ -1231,4 +1323,5 @@ save(mono_mat_permu_all, mono_mat_permu_ct, file = "./data_rda/Script4/permutati
 save(mutual_knn, mutual_knn_all, mono_mat_all, mono_mat_permu_all,
      mutual_knn_ct, mono_mat_ct, mono_mat_permu_ct, file = "./data_rda/Script4/SCAVENGE_FINAL.rda")
 ```
+
 

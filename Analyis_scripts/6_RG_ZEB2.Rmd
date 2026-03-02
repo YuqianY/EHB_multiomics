@@ -94,10 +94,10 @@ Keep in mind: ZEB2 is just *one out of many* potential targets of these TFs!
 select <- c("SOX2","POU3F2","GBX2","MECOM","EBF1","TCF4","MEIS1","BCL11B")
 ```
 
-```{r}
+```{r
 ## split by region, colour by age (looks like regional difference is more prominent than age differences)
 
-# create pseudobulks ~ 8 min
+# create pseudobulks ~ 8 min [MacBook M4, ArchRThreads = 4, more threads is slower!]
 set.seed(100)
 addArchRThreads(4)
 ArchR_EHB_RG <- addGroupCoverages(ArchR_EHB_RG, groupBy = "Sample", force = TRUE)
@@ -124,8 +124,8 @@ for (x in unique(ArchR_EHB_RG$Region)){
 ```
 
 ### supp fig - global
-```{r}
-# create pseudobulks ~ 3.6 min
+```{r
+# create pseudobulks ~ 3.6 min [MacBook M4, ArchRThreads = 4, more threads is slower!]
 set.seed(100)
 addArchRThreads(4)
 ArchR_EHB_RG <- addGroupCoverages(ArchR_EHB_RG, groupBy = "Region", force = TRUE)
@@ -164,6 +164,8 @@ for (i in 1:length(p)) {
 png("./ArchR_EHB/Plots/Script6/grid_footprint.png", width = 2000, height = 2500, res = 500)
 wrap_plots(p, ncol = 2)
 dev.off()
+
+# interesting: GBX2, in the homeobox family - https://cisbp.ccbr.utoronto.ca/TFnewreport.php?searchTF=T209892_3.00
 ```
 
 
@@ -189,7 +191,7 @@ for (x in names(motifPositions_fil)){
 save(motifPositions_hits_in_ZEB2, file = "./data_rda/Script6/motifPositions_hits_in_ZEB2.rda")
 ```
 
-```{r}
+```{r
 # Tn5 insertion signal must not have too many 0s
 summary_Tn5 <- data.frame()
 for (x in names(seFoot@assays@data@listData)){
@@ -246,7 +248,7 @@ dev.off()
 
 
 ## (4) TF chromVAR ~ TF GS
-```{r}
+```{r
 # get chromVAR and geneScore for RG cells
 load("./data_rda/Script3/Spearman_correlation.rda")
 
@@ -260,7 +262,7 @@ rm(corInput_chromVAR, corInput_geneScore)
 gc()
 ```
 
-```{r}
+```{r
 # Spearman correlation, split by region and age ~ 1 min
 correlation_table <- data.frame()
 for (x in unique(RG_geneScore$Region)){
@@ -338,7 +340,7 @@ draw(p, heatmap_legend_side = "bottom")
 
 
 ## (5) TF chromVAR ~ ZEB2 GS
-```{r}
+```{r
 # get chromVAR and geneScore for RG cells
 load("./data_rda/Script3/Spearman_correlation.rda")
 load("./data_rda/Script5/gene_score_matrix_RG.rda")
@@ -355,7 +357,7 @@ rm(corInput_chromVAR, corInput_geneScore, gene_score_matrix)
 gc()
 ```
 
-```{r}
+```{r
 # Spearman correlation, split by region and age ~ 1 min
 correlation_table <- data.frame()
 for (x in unique(RG_geneScore$Region)){
@@ -484,7 +486,7 @@ table_cor_fil$region <- factor(table_cor_fil$region, levels = c("FB","CP","MD"))
 save(table_cor_fil, file = "./data_rda/Script6/correlation_merge.rda")
 ```
 
-```{r}
+```{r
 ggplot(table_cor_fil, aes(x=sample, y=gene, fill=ZEB2_coefficient, shape=ZEB2_correlation, size=self_coefficient)) +
   geom_point() + xlab("") + ylab("") + BuenColors::pretty_plot() + facet_wrap(~region, scales = "free_x") +
   scale_fill_gradient2(low = "blue", mid = "white",  high = "red", midpoint = 0, guide = guide_colorbar(barheight = 0.5)) +
@@ -592,7 +594,7 @@ ATAC peaks in ArchR are *fixed-width (500 bp)*, centered around the position wit
 summary(ZEB2_enhancers$End - ZEB2_enhancers$Start)
 ```
 
-```{r}
+```{r
 # find region marker peaks ~ 1 min
 markersPeaks_rg <- getMarkerFeatures(ArchR_EHB_RG, useMatrix = "PeakMatrix", groupBy = "Region", 
                                      bias = c("TSSEnrichment", "log10(nFrags)"), testMethod = "wilcoxon", k = 100, maxCells = 5000)
@@ -612,14 +614,14 @@ ZEB2_peaks_all <- GRanges(seqnames = ZEB2_peaks_all$seqnames,
 save(ZEB2_peaks_all, file = "./data_rda/Script6/ZEB2_peaks_all.rda")
 ```
 
-```{r}
+```{r
 # This proves that getMarkerFeatures() and getMarkers() still retains all accessible peaks
 PeakMatrix <- getMatrixFromProject(ArchR_EHB_RG, useMatrix = "PeakMatrix", excludeChr = paste0("chr", c(1,3:22, "M", "X", "Y")))
 nrow(peaks) == nrow(PeakMatrix) # 41289 peaks
 rm(PeakMatrix)
 ```
 
-```{r}
+```{r
 # get ATAC peaks in ZEB2 regulatory region - brain region-specific
 markersPeaks_region <- getMarkers(markersPeaks_rg, cutOff = "FDR <= 0.01 & Log2FC >= 0.6")
 ZEB2_peaks_region <- list()
@@ -723,7 +725,7 @@ names(p)
 
 
 ### fig - coAccess peak heatmaps
-```{r}
+```{r
 # get co-accessibility by region
 p <- list()
 peak_coAccess_in_ZEB2 <- list()
@@ -941,7 +943,7 @@ rm(seFoot, motifPositions)
 - 81/83 interactor proteins (BioGRID human) - both physical and genetic interactions!
 - 107/108 target genes (Birkhoff 2023 mouse)
 - 12/12 pathway genes (Benito-Kwiecinski 2021 human)
-```{r}
+```{r
 # interactor proteins (BioGRID human)
 genes <- read.csv("./data_input/ZEB2_mechanism/BioGRID_ZEB2_interactors.csv")
 genes <- genes$Interactor
@@ -987,7 +989,7 @@ end(target_genes_GRanges) <- pmin(end(target_genes_GRanges),  # make sure the en
 target_genes_GRanges@ranges@width
 ```
 
-```{r}
+```{r
 # find ZEB2 binding motifs in target gene regulatory regions
 motifPositions <- getPositions(ArchR_EHB_RG, name="Motif-ZEB2")
 hits <- findOverlaps(motifPositions$ZEB2, target_genes_GRanges)
@@ -998,6 +1000,44 @@ names(motifPositions_hits) <- "ZEB2 motifs for all target genes"
 # footprinting for all genes ~ 0.7 min
 seFoot <- getFootprints(ArchR_EHB_RG, positions = motifPositions_hits, groupBy = "Region")
 plotFootprints(seFoot, ArchRProj = ArchR_EHB_RG, normMethod = "Subtract", plotName = "Script6/TF-Footprints_ZEB2_target_gene_all2", 
+               addDOC = FALSE, smoothWindow = 5, baseSize = 8, pal = c("#009B95","#FDE333", "#53CC67"))
+```
+
+
+### TF footprints for accessible genes
+```{r
+# calculate regional gene score average
+load("./data_rda/Script5/gene_score_matrix_RG.rda")
+gene_score_matrix_fil <- gene_score_matrix[na.omit(match(target_genes, rownames(gene_score_matrix))),]
+gene_score_matrix_fil <- assay(gene_score_matrix_fil)
+sum(colnames(gene_score_matrix_fil) == ArchR_EHB_RG$cellNames) == length(ArchR_EHB_RG$cellNames)
+
+avg_gene_score_summary <- data.frame(matrix(ncol=0,nrow=nrow(gene_score_matrix_fil)))
+for (x in unique(ArchR_EHB_RG$Region)){
+  avg_gene_score <- rowMeans(gene_score_matrix_fil[,ArchR_EHB_RG$Region==x])
+  avg_gene_score_summary <- cbind(avg_gene_score_summary, avg_gene_score)
+  rm(x, avg_gene_score)
+}
+names(avg_gene_score_summary) <- unique(ArchR_EHB_RG$Region)
+
+save(avg_gene_score_summary, file = "./data_rda/Script6/avg_gene_score_summary.rda")
+rm(gene_score_matrix, gene_score_matrix_fil)
+gc()
+```
+
+```{r
+# find "accessible" genes (all three regions must have average gene score >= 0.3)
+target_genes_accessible <- row.names(avg_gene_score_summary)[rowSums(avg_gene_score_summary >= 0.3) == 3]
+
+# find ZEB2 binding motifs in target gene regulatory regions
+hits <- findOverlaps(motifPositions$ZEB2, target_genes_GRanges[target_genes_GRanges$symbol %in% target_genes_accessible,])
+motifPositions_hits <- motifPositions$ZEB2[queryHits(hits)]
+motifPositions_hits <- GRangesList(motifPositions_hits)
+names(motifPositions_hits) <- "ZEB2 motifs for accessible target genes"
+
+# footprinting for all accessible genes
+seFoot <- getFootprints(ArchR_EHB_RG, positions = motifPositions_hits, groupBy = "Region")
+plotFootprints(seFoot, ArchRProj = ArchR_EHB_RG, normMethod = "Subtract", plotName = "Script6/TF-Footprints_ZEB2_target_gene_accessible", 
                addDOC = FALSE, smoothWindow = 5, baseSize = 8, pal = c("#009B95","#FDE333", "#53CC67"))
 ```
 
@@ -1143,10 +1183,12 @@ fil <- fil %>% mutate(gene = factor(gene, levels = row_clust$labels[row_clust$or
 fil$region <- factor(fil$region, levels = c("FB","CP","MD"))
 
 # plotting
-ggplot(fil, aes(x=age, y=gene, fill=coefficient)) +
-  geom_tile() + xlab("") + ylab("") + BuenColors::pretty_plot() + facet_wrap(~region, ncol=3) +
+ggplot(fil, aes(x=gene, y=age, fill=coefficient)) +
+  geom_tile() + xlab("") + ylab("") + BuenColors::pretty_plot() + 
+  facet_wrap(~region, ncol=1) +
   scale_fill_gradient2(low = "#4a1491", mid = "white",  high = "#f23d68") +
-  theme(axis.text.x = element_text(angle=45,hjust=1), plot.title = element_text(size=10)) +
+  theme(axis.text.x = element_text(angle=45,hjust=1), plot.title = element_text(size=10),
+        legend.position = "right") +
   geom_text(aes(label = sig), size = 5, color = "black",nudge_y=-0.2) +
   ggtitle("ZEB2 pathway gene score ~ ZEB2 gene score")
 ```

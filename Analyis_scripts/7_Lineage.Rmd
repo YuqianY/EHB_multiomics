@@ -115,6 +115,24 @@ p1
 dev.off()
 ```
 
+```{r plot for presentation: how to construct "Forebrain late" trajectory}
+library(ArchR)
+load("./data_rda/Script7/ArchR_lineage_neuro.rda")
+trial <- ArchR_lineage_neuro[["Forebrain"]]
+
+# hide early cells
+trial$new <- trial$ctAnnot_2.0
+trial$new[trial$Age %in% c("CS14","CS16")] <- "early"
+
+plotPDF(plotEmbedding(trial, colorBy = "cellColData", name = "new", 
+                        embedding = "UMAP_neuro",  labelMeans=FALSE,
+                        pal = c(Neuron="#3ee2ff", Neuroblast="#00cfff", "Neuronal IPC" = "#40a1ff", 
+                                'Radial glia'="#836dff", Glioblast="#c47df0", "early"="grey80")), 
+          name = paste0("presentation.pdf"), 
+          ArchRProj = trial, addDOC = FALSE, width = 6, height = 6)
+```
+
+
 
 ## (2) glial lineage
 ```{r}
@@ -216,7 +234,192 @@ save(ArchR_lineage_glial, file = "./data_rda/Script7/ArchR_lineage_glial.rda")
 
 
 
-# 2. TF activity
+# 2. Validation
+## (1) pseudotime ~ age
+```{r
+# Neuronal lineage
+summary <- data.frame()
+for (x in names(ArchR_lineage_neuro)){
+  for (y in c("Early", "Late")){
+    name <- paste0(x, "_", y)
+    for (z in unique(ArchR_lineage_neuro[[x]]$Age[ArchR_lineage_neuro[[x]]$Stage==name])){
+      df <- data.frame("pseudotime" = na.omit(ArchR_lineage_neuro[[x]]@cellColData@listData[[name]][ArchR_lineage_neuro[[x]]$Age==z]), 
+                       "region"=x, "stage"=y, "age"=z)
+      summary <- rbind(summary, df)  
+    }
+  }
+  rm(x, y, z, name, df)
+}
+
+ggplot(summary, aes(x=age, y=pseudotime, group = age, fill = stage)) +
+  geom_violin() + facet_wrap(~region) + BuenColors::pretty_plot() + xlab("") + ggtitle("Neuronal lineage")
+rm(summary)
+```
+
+```{r
+# Glial lineage
+summary <- data.frame()
+for (x in names(ArchR_lineage_glial)){
+  for (y in c("Early", "Late")){
+    name <- paste0(x, "_", y)
+    for (z in unique(ArchR_lineage_glial[[x]]$Age[ArchR_lineage_glial[[x]]$Stage==name])){
+      df <- data.frame("pseudotime" = na.omit(ArchR_lineage_glial[[x]]@cellColData@listData[[name]][ArchR_lineage_glial[[x]]$Age==z]), 
+                       "region"=x, "stage"=y, "age"=z)
+      summary <- rbind(summary, df)  
+    }
+  }
+  rm(x, y, z, name, df)
+}
+
+ggplot(summary, aes(x=age, y=pseudotime, group = age, fill = stage)) +
+  geom_violin() + facet_wrap(~region) + BuenColors::pretty_plot() + xlab("") + ggtitle("Glial lineage")
+rm(summary)
+```
+
+
+## (2) pseudotime ~ gene score
+```{r
+# Neuronal lineage
+p <- list()
+for (x in names(ArchR_lineage_neuro)){
+  for (y in c("Early", "Late")){
+    name <- paste0(x, "_", y)
+    p[[name]] <- plotTrajectory(ArchR_lineage_neuro[[x]], embedding = "UMAP_neuro", trajectory = name, 
+                             colorBy = "GeneScoreMatrix", name = "RBFOX3", plotAs = "points")
+  }
+}
+rm( x, y, name)
+p1 <- unlist(p, recursive = FALSE)
+
+png("./ArchR_EHB/Plots/Script7/pseudotime_genescore_neuro.png", width = 4500, height = 1700, res = 200)
+wrap_plots(p1, ncol=6, byrow=FALSE, heights=c(3,1))
+dev.off()
+```
+
+```{r
+# Glial lineage
+p <- list()
+for (x in c("CerebellumPons","Medulla")){
+  for (y in c("Early", "Late")){
+    name <- paste0(x, "_", y)
+    p[[name]] <- plotTrajectory(ArchR_lineage_glial[[x]], embedding = "UMAP_glial", trajectory = name, 
+                             colorBy = "GeneScoreMatrix", name = "NFIA", plotAs = "points")
+  }
+}
+rm( x, y, name)
+p2 <- unlist(p, recursive = FALSE)
+
+png("./ArchR_EHB/Plots/Script7/pseudotime_genescore_glial.png", width = 3000, height = 1700, res = 200)
+wrap_plots(p2, ncol=4, byrow=FALSE, heights=c(3,1))
+dev.off()
+```
+
+```{r
+# selected
+select <- list("Forebrain_Early_neuronal" = p1[["Forebrain_Early2"]], 
+               "Forebrain_Late_neuronal" = p1[["Forebrain_Late2"]],
+               "CerebellumPons_Early_neuronal" = p1[["CerebellumPons_Early2"]], 
+               "CerebellumPons_Late_neuronal" = p1[["CerebellumPons_Late2"]],
+               "CerebellumPons_Early_glial" = p2[["CerebellumPons_Early2"]], 
+               "CerebellumPons_Late_glial" = p2[["CerebellumPons_Late2"]])
+for (x in names(select)){
+  select[[x]] <- select[[x]] + ggtitle(x)
+  rm(x)
+}
+
+png("./ArchR_EHB/Plots/Script7/pseudotime_genescore_select.png", width = 3500, height = 1700, res = 200)
+wrap_plots(select, ncol=3, byrow=FALSE)
+dev.off()
+```
+
+
+## (3) cluster label & subtype
+```{r}
+load("./data_rda/Script7/ArchR_lineage_neuro.rda")
+load("./data_rda/Script7/ArchR_lineage_glial.rda")
+```
+
+```{r}
+# cluster labels
+clusterAnnot <- readxl::read_excel("./data_output/Script1_ctAnnotation/ctAnnot_sheet5_clusterAnnot.xlsx")
+
+# add cell type annotation (C1, C2, C3, C4 must be replaced in the second round)
+for (x in names(ArchR_lineage_neuro)){
+  # neuro
+  ArchR_lineage_neuro[[x]]$cluster_label <- stri_replace_all_regex(ArchR_lineage_neuro[[x]]$Clusters_2.0, 
+                              pattern = clusterAnnot$cluster[!clusterAnnot$cluster %in% paste0("C",1:4)], 
+                              replacement = clusterAnnot$label_clean[!clusterAnnot$cluster %in% paste0("C",1:4)],
+                              vectorize = FALSE)
+  ArchR_lineage_neuro[[x]]$cluster_label <- stri_replace_all_regex(ArchR_lineage_neuro[[x]]$cluster_label, 
+                              pattern = clusterAnnot$cluster, 
+                              replacement = clusterAnnot$label_clean,
+                              vectorize = FALSE)
+  
+  # glia
+  ArchR_lineage_glial[[x]]$cluster_label <- stri_replace_all_regex(ArchR_lineage_glial[[x]]$Clusters_2.0, 
+                              pattern = clusterAnnot$cluster[!clusterAnnot$cluster %in% paste0("C",1:4)], 
+                              replacement = clusterAnnot$label_clean[!clusterAnnot$cluster %in% paste0("C",1:4)],
+                              vectorize = FALSE)
+  ArchR_lineage_glial[[x]]$cluster_label <- stri_replace_all_regex(ArchR_lineage_glial[[x]]$cluster_label, 
+                              pattern = clusterAnnot$cluster, 
+                              replacement = clusterAnnot$label_clean,
+                              vectorize = FALSE)
+}
+
+rm(x, clusterAnnot)
+```
+
+```{r}
+# get RG subtypes from script 5
+load("./data_rda/Script5/seurat_RG_raw.rda")
+annot <- data.frame(seurat_RG$ctAnnot_RG)
+annot$ID <- rownames(annot)
+names(annot)[1] <- "subtype"
+rm(seurat_RG, cluster_markers)
+gc()
+
+# replace with more accurate RG subtypes
+for (x in names(ArchR_lineage_neuro)){
+  # neuro
+  overlap <- ArchR_lineage_neuro[[x]]@cellColData@rownames[ArchR_lineage_neuro[[x]]@cellColData@rownames %in% annot$ID]
+  annot_fil <- annot[overlap,]
+  ArchR_lineage_neuro[[x]]$cluster_label[ArchR_lineage_neuro[[x]]@cellColData@rownames %in% annot$ID] <- as.vector(annot_fil$subtype)
+  
+  # glia
+  overlap <- ArchR_lineage_glial[[x]]@cellColData@rownames[ArchR_lineage_glial[[x]]@cellColData@rownames %in% annot$ID]
+  annot_fil <- annot[overlap,]
+  ArchR_lineage_glial[[x]]$cluster_label[ArchR_lineage_glial[[x]]@cellColData@rownames %in% annot$ID] <- as.vector(annot_fil$subtype)
+  
+  rm(x, overlap, annot_fil)
+}
+```
+
+```{r}
+# umap - neuro
+p <- list()
+for (x in names(ArchR_lineage_neuro)){
+  p[[x]] <- plotEmbedding(ArchR_lineage_neuro[[x]], colorBy = "cellColData", name = "cluster_label", 
+                          embedding = "UMAP_neuro",  labelMeans=FALSE,
+                          pal = c(tNE="#463C91",vRG="#5E4CE6",oRG="#9E8FFF",tRG="#BFB6FA",MGE="#E687E2",
+                                  NB="#00cfff",NEU="#3ee2ff","NEU-IN"="#7ED6C8","NEU-new"="#3EFCFF",
+                                  nIPC="#40a1ff","nIPC-EN"="#1C76E6","nIPC-IN"="#3CDECE"))
+  rm(x)
+}
+plotPDF(p, name = paste0("neuro_UMAP_cluster_label.pdf"), ArchRProj = ArchR_lineage_neuro[[1]], addDOC = FALSE, width = 6, height = 6)
+
+# umap - glial
+p <- list()
+for (x in c("CerebellumPons","Medulla")){
+  p[[x]] <- plotEmbedding(ArchR_lineage_glial[[x]], colorBy = "cellColData", name = "cluster_label", 
+                          embedding = "UMAP_glial",  labelMeans=FALSE,
+                          pal = c(tNE="#463C91",vRG="#5E4CE6",oRG="#9E8FFF",tRG="#BFB6FA",GB="#c47df0"))
+  rm(x)
+}
+plotPDF(p, name = paste0("glial_UMAP_cluster_label.pdf"), ArchRProj = ArchR_lineage_glial[[1]], addDOC = FALSE, width = 6, height = 6)
+```
+
+
+# 3. TF activity
 ## (1) ct-region-specific TF
 ```{r}
 load("./data_rda/Script7/ArchR_lineage_neuro.rda")
@@ -294,6 +497,7 @@ draw(p, merge_legends = TRUE, gap = unit(-2, "mm"))
 ```
 
 
+
 ## (3) neuronal lineage
 ```{r}
 # select TFs that have correlated gene score and motif chromVAR z score, and also in the ct-region-spc list from script 3 ~ 4 min
@@ -358,9 +562,9 @@ draw(p, merge_legends = TRUE, gap = unit(-2, "mm"), heatmap_legend_side = "botto
 
 
 
-# 3. Disease risk (Neuronal only)
+# 4. Disease risk (Neuronal only)
 ## (1) adding TRS
-```{r}
+```{r
 # SCAVENGE TRS result from section 3
 load("./data_rda/Script4/SCAVENGE_ctpeaks_5ct.rda")
 rm(mutual_knn, mutual_knn_ct)
@@ -387,7 +591,7 @@ anyNA(TRS_matrix) == FALSE # no NAs
 ArchR_lineage_neuro_TRS <- ArchR_lineage_neuro[c("Forebrain","CerebellumPons")]
 ```
 
-```{r}
+```{r
 ## adding the raw TRS score without normalisation!
 
 # 1. Unlock the binding in ArchR namespace
@@ -406,7 +610,7 @@ lockBinding(".normalizeCols", asNamespace("ArchR"))
 ```
 
 ### add to forebrain
-```{r}
+```{r
 cells <- ArchR_lineage_neuro_TRS$Forebrain$cellNames[ArchR_lineage_neuro_TRS$Forebrain$cellNames %in% colnames(TRS_matrix)]
 ArchR_lineage_neuro_TRS$Forebrain <- ArchR_lineage_neuro_TRS$Forebrain[ArchR_lineage_neuro_TRS$Forebrain$cellNames %in% cells,]
 matrix <- TRS_matrix[,cells]
@@ -431,7 +635,7 @@ getAvailableMatrices(ArchR_lineage_neuro_TRS$Forebrain)
 getFeatures(ArchR_lineage_neuro_TRS$Forebrain, useMatrix = "GeneExpressionMatrix")
 ```
 
-```{r}
+```{r
 # check matrix: raw TRS score!
 ArchR_TRS_matrix <- getMatrixFromProject(ArchR_lineage_neuro_TRS$Forebrain, useMatrix = "GeneExpressionMatrix")
 ArchR_TRS_matrix@assays@data$GeneExpressionMatrix[,colnames(matrix)[1:5]]
@@ -439,7 +643,7 @@ matrix[,1:5]
 ```
 
 ### add to cerebellum pons
-```{r}
+```{r
 cells <- ArchR_lineage_neuro_TRS$CerebellumPons$cellNames[ArchR_lineage_neuro_TRS$CerebellumPons$cellNames %in% colnames(TRS_matrix)]
 ArchR_lineage_neuro_TRS$CerebellumPons <- ArchR_lineage_neuro_TRS$CerebellumPons[ArchR_lineage_neuro_TRS$CerebellumPons$cellNames %in% cells,]
 matrix <- TRS_matrix[,cells]
@@ -477,7 +681,7 @@ save(ArchR_lineage_neuro_TRS, file = "./data_rda/Script7/ArchR_lineage_neuro_TRS
 
 ## (2) pseudotime disease risk
 ### find regions/stages of interest
-```{r}
+```{r
 p <- list()
 for (x in c("Forebrain","CerebellumPons")){
   for (y in c("Early", "Late")){
@@ -606,7 +810,7 @@ ggplot(sig_summary, aes(x = pseudotime, y = odds_ratio, group = group, colour = 
 
 ## (3) TRS ~ chromVAR
 ### find genes of interest
-```{r}
+```{r
 # select TFs that have correlated TRS and motif chromVAR z score ~ 1 min
 correlation_table <- list()
 heatmap <- list()
@@ -652,7 +856,7 @@ for (x in c("Forebrain","CerebellumPons")){
 save(correlation_table, heatmap, file = "./data_rda/Script7/trajCor_TRS.rda")
 ```
 
-```{r}
+```{r
 pdf("./ArchR_EHB/Plots/Script7/pseudotime_heatmap_TRS_neuro.pdf", width = 6, height = 6)
 for (x in names(heatmap)){
   for(y in names(heatmap[[x]])){

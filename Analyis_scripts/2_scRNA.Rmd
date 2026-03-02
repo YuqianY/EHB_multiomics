@@ -9,7 +9,6 @@ library(readxl)
 library(htmlwidgets)
 library(tidyr)
 library(dplyr)
-#library(ggdendro) # clean up
 library(ggsankey)
 library(stringi)
 library(plotly)
@@ -23,9 +22,9 @@ library(RColorBrewer)
 ## (1) import RNA counts
 ```{r}
 # import RNA counts ~ 6 min
-counts_multiome <- Read10X(data.dir = "./data_input/data_EHB_multiome")
+counts_multiome <- Read10X(data.dir = "./data_input/data_EHB_multiome") # or Read10X_h5("./data_input/data_EHB_multiome/filtered_feature_bc_matrix.h5")
 counts_multiome <- counts_multiome$`Gene Expression`
-counts_scRNA <- Read10X(data.dir = "./data_input/data_EHB_scRNA")
+counts_scRNA <- Read10X(data.dir = "./data_input/data_EHB_scRNA") 
 counts_Braun <- Read10X(data.dir= "./data_input/data_Braun_15-21")
 
 # inspect
@@ -143,7 +142,7 @@ rm(Braun_ctAnnot)
 DimPlot(Seurat_combined[,Seurat_combined$source%in%c("Braun_V2","Braun_V3")], reduction = "umap", group.by = c("ctAnnot"))
 
 # plotting ctAnnot: Braun + mine (NA)
-DimPlot(Seurat_combined, reduction = "umap", group.by = c("ctAnnot"))
+#DimPlot(Seurat_combined, reduction = "umap", group.by = c("ctAnnot"))
 ```
 
 ```{r}
@@ -500,7 +499,7 @@ names(clusterMarker_table) <- c("cluster", "cluster top DAG", "TF top DAG")
 clusterMarker_table$cluster <- as.numeric(clusterMarker_table$cluster)
 
 
-rm(ctMarker_table, clusterMarker_table)
+#rm(ctMarker_table, clusterMarker_table)
 ```
 
 -- CS21 scRNA --
@@ -529,7 +528,7 @@ for (x in unique(Seurat_scRNA$clusters_0.6)){
 names(clusterMarker_table) <- c("cluster", "cluster top DAG", "TF top DAG")
 clusterMarker_table$cluster <- as.numeric(clusterMarker_table$cluster)
 
-rm(ctMarker_table, clusterMarker_table)
+#rm(ctMarker_table, clusterMarker_table)
 ```
 
 
@@ -592,7 +591,7 @@ ggplot(sankey_df, aes(x=x, next_x=next_x, node=celltype, next_node=next_node, fi
         axis.ticks=element_blank(), panel.grid = element_blank(), legend.position.inside = c(0.93, 0.5)) + 
   guides(fill = guide_legend(reverse = TRUE))
 
-rm(sankey_df, count_df, df)
+#rm(sankey_df, count_df, df)
 ```
 
 ```{r}
@@ -720,5 +719,143 @@ save(Seurat_multiome, Seurat_scRNA, file="./data_rda/Script2/Seurat_RNAx2.rda")
 save(markers_multiome, markers_multiome_ct, markers_multiome_ct_FDR, markers_multiome_ct_log2FC,
      markers_scRNA, markers_scRNA_ct, file = "./data_rda/Script2/scRNA_Annotation.rda")
 rm(Seurat_multiome, Seurat_scRNA, markers_multiome, markers_multiome_ct, markers_multiome_ct_FDR, markers_multiome_ct_log2FC, markers_scRNA, markers_scRNA_ct)
+```
+
+
+
+# 3. Cell cycle
+```{r}
+load("./ArchR_fil/ArchR_fil_sample.rda")
+load("./data_rda/Script2/Seurat_RNAx2.rda")
+rm(Seurat_scRNA)
+```
+
+## (1) RNA-based
+```{r}
+# calculate S phase and G2M scores
+set.seed(100)
+Seurat_multiome <- CellCycleScoring(Seurat_multiome, set.ident = TRUE, s.features = cc.genes$s.genes, g2m.features = cc.genes$g2m.genes)
+
+# inspect
+summary(Seurat_multiome$S.Score)
+summary(Seurat_multiome$G2M.Score)
+table(Seurat_multiome$Phase)
+Seurat_multiome$Phase_RNA <- Seurat_multiome$Phase
+```
+
+```{r}
+# RNA UMAP, CS16 FB
+DimPlot(Seurat_multiome, reduction = "umap", group.by = c("Phase_RNA"))
+```
+
+```{r}
+# ATAC UMAP, CS16 FB
+SINAG3_fil <- ArchR_fil$SINAG3[ArchR_fil$SINAG3$cellNames %in% paste0("SINAG3#", names(Seurat_multiome$orig.ident))]
+phase <- as.data.frame(Seurat_multiome$Phase)
+phase$ID <- paste0("SINAG3#", row.names(phase))
+phase <- phase[phase$ID %in% SINAG3_fil$cellNames,]
+phase <- phase[order(match(phase$ID, SINAG3_fil$cellNames)),]
+sum(phase$ID == SINAG3_fil$cellNames) == nrow(phase)
+SINAG3_fil$phase_RNA <- phase$`Seurat_multiome$Phase`
+plotEmbedding(SINAG3_fil, colorBy = "cellColData", name = "phase_RNA", embedding = "UMAP", labelMeans=FALSE, size = 0.01)
+```
+
+
+## (2) ATAC-based
+```{r}
+# predict cell cycle from ATAC gene scores
+set.seed(100)
+geneScore <- getMatrixFromProject(SINAG3_fil, useMatrix = "GeneScoreMatrix")
+geneScoreMatrix <- geneScore@assays@data@listData[["GeneScoreMatrix"]]
+rownames(geneScoreMatrix) <- geneScore@elementMetadata@listData[["name"]]
+Seurat_ATAC <- CreateSeuratObject(geneScoreMatrix, project = "ATAC")
+Seurat_ATAC <- CellCycleScoring(Seurat_ATAC, set.ident = TRUE, s.features = cc.genes$s.genes, g2m.features = cc.genes$g2m.genes)
+
+# inspect
+summary(Seurat_ATAC$S.Score)
+summary(Seurat_ATAC$G2M.Score)
+table(Seurat_ATAC$Phase)
+```
+
+```{r}
+# ATAC UMAP
+SINAG3_fil$cellNames == names(Seurat_ATAC$orig.ident)
+SINAG3_fil$phase_ATAC <- Seurat_ATAC$Phase
+plotEmbedding(SINAG3_fil, colorBy = "cellColData", name = "phase_ATAC", embedding = "UMAP", labelMeans=FALSE, size = 0.01)
+```
+
+```{r}
+# RNA UMAP, colour by phase
+phase2 <- data.frame(ID = names(Seurat_multiome$orig.ident))
+phase2_core <- data.frame(Seurat_ATAC$Phase)
+phase2_core$ID <- sub("SINAG3#","",row.names(phase2_core))
+phase2 <- merge(phase2, phase2_core[, c("ID", "Seurat_ATAC.Phase")], by = "ID", all.x = TRUE)
+#phase2$phase <- ifelse(!is.na(phase2$Seurat_ATAC.Phase), phase2$Seurat_ATAC.Phase, phase2$phase)
+phase2$ID == names(Seurat_multiome$orig.ident)
+Seurat_multiome$Phase_ATAC <- phase2$Seurat_ATAC.Phase
+DimPlot(Seurat_multiome, reduction = "umap", group.by = c("Phase_ATAC"))
+
+# remove cells in RNA only (no ATAC)
+Seurat_multiome
+DimPlot(Seurat_multiome, reduction = "umap", group.by = c("Phase_ATAC")) + 
+  scale_color_manual(values = c("G1"=scales::hue_pal()(3)[1], "G2M"=scales::hue_pal()(3)[2],
+                                "S"=scales::hue_pal()(3)[3], "NA"="white"), na.translate = FALSE)
+```
+
+
+## (3) compare
+```{r}
+# combine two predictions
+phase_combine <- data.frame(ATAC_S = Seurat_ATAC$S.Score, ATAC_G2M = Seurat_ATAC$G2M.Score, ATAC_phase = Seurat_ATAC$Phase)
+phase_combine2 <- data.frame(RNA_S = Seurat_multiome$S.Score, RNA_G2M = Seurat_multiome$G2M.Score, RNA_phase = Seurat_multiome$Phase)
+row.names(phase_combine) <- sub("SINAG3#","",row.names(phase_combine))
+phase_combine <- merge(phase_combine, phase_combine2, by = "row.names")
+
+# accuracy (RNA=ATAC%)
+sum(phase_combine$ATAC_phase == phase_combine$RNA_phase) / nrow(phase_combine)
+```
+
+```{r}
+# Sankey plot: cell phase annotations
+sankey_df <- phase_combine %>% make_long(ATAC_phase, RNA_phase)
+count_df <- sankey_df %>% dplyr::group_by(node) %>% tally()  
+df <- merge(sankey_df, count_df, by = 'node', all.x = TRUE)
+names(df)[1] <- "phase"
+ggplot(df, aes(x=x, next_x=next_x, node=phase, next_node=next_node, fill=phase)) + 
+  geom_sankey(flow.alpha=0.5, node.color="black", show.legend=T) + theme_minimal() + 
+  theme(axis.title=element_blank(), axis.text.y = element_blank(),
+        axis.ticks=element_blank(), panel.grid = element_blank(), 
+        legend.position = c(0.88, 0.5)) + 
+  guides(fill = guide_legend(reverse = TRUE))
+
+#rm(sankey_df, count_df, df, multiome_ct_ATAC)
+```
+
+
+```{r}
+# correlation: S scores
+correlation <- cor.test(phase_combine$ATAC_S, phase_combine$RNA_S)
+ggplot(phase_combine, aes(x=ATAC_S, y=RNA_S)) +
+  geom_point(alpha = 0.4) + geom_smooth(method=lm , color="red", fill="#69b3a2", se=TRUE) +
+  annotate("text", x = Inf, y = Inf, hjust = 1.1, vjust = 1.5, size = 5,
+           label = paste0("Correlation R = ", round(correlation$estimate, 2), 
+                          ", p = ", formatC(correlation$p.value, format = "e", digits = 2))) +
+  theme_minimal()
+```
+
+```{r}
+# correlation: G2M scores
+correlation <- cor.test(phase_combine$ATAC_G2M, phase_combine$RNA_G2M)
+ggplot(phase_combine, aes(x=ATAC_G2M, y=RNA_G2M)) +
+  geom_point(alpha = 0.4) + geom_smooth(method=lm , color="red", fill="#69b3a2", se=TRUE) +
+  annotate("text", x = Inf, y = Inf, hjust = 1.1, vjust = 1.5, size = 5,
+           label = paste0("Correlation R = ", round(correlation$estimate, 2), 
+                          ", p = ", formatC(correlation$p.value, format = "e", digits = 2))) +
+  theme_minimal()
+```
+
+## (4) save
+```{r}
+save(phase_combine, SINAG3_fil, Seurat_multiome, file = "./data_rda/Script2/cell_cycle.rda")
 ```
 
