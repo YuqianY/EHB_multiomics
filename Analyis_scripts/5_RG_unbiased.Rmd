@@ -1,6 +1,6 @@
 Neuroepithelial cell to radial glia transition: discover regulator genes and modules
 
-```{r}
+```{r, message=FALSE}
 library(ArchR)
 addArchRGenome("hg38")
 options(future.globals.maxSize = 20 * 1024^4)
@@ -18,161 +18,26 @@ library(Seurat)
 library(WGCNA)
 library(hdWGCNA)
 library(harmony)
+library(ComplexHeatmap)
+library(circlize)
 ```
 
 
 
-# 1. Early vs Late RG
+# 1. RG Seurat
 ## (1) ArchR_RG
 ```{r}
 load("./data_rda/Script3/ArchR_EHB_5ct.rda")
 ArchR_EHB_RG <- ArchR_EHB_5ct[ArchR_EHB_5ct$ctAnnot_2.0=="Radial glia",]
-rm(ArchR_EHB_5ct)
-ArchR_EHB_RG # 30,183 RG cells
-
+ArchR_EHB_RG # 22,311 RG cells
 ArchR_EHB_RG$Stage <- stri_replace_all_regex(ArchR_EHB_RG$Age, pattern = c("CS14","CS16","CS17","CS20","CS21"), 
                                              replacement = c("Early","Early","Late","Late","Late"), vectorise_all = FALSE)
 save(ArchR_EHB_RG, file = "./data_rda/Script5/ArchR_EHB_RG.rda")
-```
-
-
-## (2) differential genes + GO
-```{r}
-# down-sample to 2000
-table(ArchR_EHB_RG$Stage[ArchR_EHB_RG$Region=="Forebrain"])
-table(ArchR_EHB_RG$Stage[ArchR_EHB_RG$Region=="CerebellumPons"])
-table(ArchR_EHB_RG$Stage[ArchR_EHB_RG$Region=="Medulla"])
-
-# differential analysis (split region) ~ 1.2 min
-set.seed(100)
-DAG_RG_early <- list()
-DAG_RG_late <- list()
-for (x in unique(ArchR_EHB_RG$Region)){
-  DA_RG_genes <- getMarkerFeatures(ArchR_EHB_RG[ArchR_EHB_RG$Region==x,], useMatrix = "GeneScoreMatrix", 
-                                   groupBy = "Stage", useGroups = "Early", bgdGroups = "Late",
-                                   bias = c("TSSEnrichment", "log10(nFrags)"), testMethod = "wilcoxon", k = 100, maxCells = 2000)
-  DAG_RG_early[[x]] <- data.frame(getMarkers(DA_RG_genes, cutOff = "FDR <= 0.01 & Log2FC >= 0.6"))
-  DAG_RG_late[[x]] <- data.frame(getMarkers(DA_RG_genes, cutOff = "FDR <= 0.01 & Log2FC <= -0.6"))
-  rm(x, DA_RG_genes)
-}
-```
-
-```{r}
-# GO enrichment ~ 1.2 min
-GO_early <- list()
-GO_late <- list()
-for (x in names(DAG_RG_early)){
-  GO_early[[x]] <- enrichGO(DAG_RG_early[[x]]$name, OrgDb = org.Hs.eg.db, keyType = "SYMBOL", pAdjustMethod = "BH", ont = "ALL")
-  GO_early[[x]]@result$region <- x
-  GO_early[[x]]@result$group <- "early"
-  
-  GO_late[[x]] <- enrichGO(DAG_RG_late[[x]]$name, OrgDb = org.Hs.eg.db, keyType = "SYMBOL", pAdjustMethod = "BH", ont = "ALL")
-  GO_late[[x]]@result$region <- x
-  GO_late[[x]]@result$group <- "late"
-  
-  rm(x)
-}
-```
-
-
-### supp fig - GO early
-```{r}
-# remove duplicated GO, keeping the first
-GO_early_summary <- rbind(GO_early[[1]]@result, GO_early[[2]]@result, GO_early[[3]]@result)
-result <- GO_early_summary %>% arrange(p.adjust)
-result <- dplyr::distinct(result, ID, .keep_all = TRUE) 
-row.names(result) <- result$ID
-
-# select top 10 GO per region
-result <- result %>% group_by(region) %>% slice(1:10)
-result <- as.data.frame(result)
-
-# prepare tree plot
-trial <- GO_early[[1]]
-trial@result <- result
-#semData <- godata('org.Hs.eg.db', keytype = "ENTREZID", ont = "BP", computeIC = TRUE) # the same for BP/MF/CC
-GO <- pairwise_termsim(trial, method = "Wang", semData = semData)   # using the Wang similarity
-
-# look at the dendrogram and manually set a number for ncluster
-p <- treeplot(GO, showCategory=nrow(GO), fontsize=4, cluster.params = list(n = 4), cex_category = 0)
-p
-```
-
-```{r}
-# extract clustering order
-trial <- data.frame(p$data)
-trial <- trial[!is.na(trial$label),1:10]
-result$Description <- factor(result$Description, levels=trial$label[order(trial$y)])
-result$region <- factor(result$region, levels = c("Forebrain","CerebellumPons","Medulla"))
-
-# dot plot
-ggplot(result, aes(x=region, y=Description, colour=region, size=p.adjust, shape=ONTOLOGY)) + 
-    geom_point() + scale_y_discrete() + DOSE::theme_dose() + 
-    scale_colour_manual(values=c(Forebrain="#FDE333", CerebellumPons="#53CC67", Medulla="#009B95")) + 
-    xlab("") + ylab("") + ggtitle("Early > Late") +
-    scale_size(trans = 'reverse', range=c(2,6)) + 
-    guides(colour = guide_legend(title="stage", override.aes = list(size = 4), order = 1), 
-           size = guide_legend(title="p.adjust", size = 2, order = 2), 
-           shape = guide_legend(title="GO category", size=2, override.aes = list(size = 4), order = 3)) + 
-    theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(),
-          plot.title = element_text(size = 16, hjust = 0.5), text=element_text(size=14))
-```
-
-
-### supp fig - GO late
-```{r}
-# remove duplicated GO, keeping the first
-GO_late_summary <- rbind(GO_late[[1]]@result, GO_late[[2]]@result, GO_late[[3]]@result)
-result <- GO_late_summary %>% arrange(p.adjust)
-result <- dplyr::distinct(result, ID, .keep_all = TRUE) 
-row.names(result) <- result$ID
-
-# select top 10 GO per region
-result <- result %>% group_by(region) %>% slice(1:10)
-result <- as.data.frame(result)
-
-# prepare tree plot
-trial <- GO_late[[1]]
-trial@result <- result
-#semData <- godata('org.Hs.eg.db', keytype = "ENTREZID", ont = "BP", computeIC = TRUE) # the same for BP/MF/CC
-GO <- pairwise_termsim(trial, method = "Wang", semData = semData)   # using the Wang similarity
-
-# look at the dendrogram and manually set a number for ncluster
-p <- treeplot(GO, showCategory=nrow(GO), fontsize=4, cluster.params = list(n = 4), cex_category = 0)
-p
-```
-
-```{r}
-# extract clustering order
-trial <- data.frame(p$data)
-trial <- trial[!is.na(trial$label),1:10]
-result$Description <- factor(result$Description, levels=trial$label[order(trial$y)])
-result$region <- factor(result$region, levels = c("Forebrain","CerebellumPons","Medulla"))
-
-# dot plot
-ggplot(result, aes(x=region, y=Description, colour=region, size=p.adjust, shape=ONTOLOGY)) + 
-    geom_point() + scale_y_discrete() + DOSE::theme_dose() + 
-    scale_colour_manual(values=c(Forebrain="#FDE333", CerebellumPons="#53CC67", Medulla="#009B95")) + 
-    xlab("") + ylab("") + ggtitle("Late > Early") +
-    scale_size(trans = 'reverse', range=c(2,6)) + 
-    guides(colour = guide_legend(title="stage", override.aes = list(size = 4), order = 1), 
-           size = guide_legend(title="p.adjust", size = 2, order = 2), 
-           shape = guide_legend(title="GO category", size=2, override.aes = list(size = 4), order = 3)) + 
-    theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(),
-          plot.title = element_text(size = 16, hjust = 0.5), text=element_text(size=14))
-```
-
-
-## (3) save
-```{r}
-save(DAG_RG_early, DAG_RG_late, GO_early, GO_late, GO_early_summary, GO_late_summary, file = "./data_rda/Script5/RG_early_vs_late.rda")
-rm(DAG_RG_early, DAG_RG_late, GO_early, GO_early_summary, GO_late, GO_late_summary, GO, p, result, trial, semData)
+rm(ArchR_EHB_5ct)
 gc()
 ```
 
-
-# 2. RG Seurat
-## (1) prepare Seurat
+## (2) Seurat
 ```{r}
 # get gene scores ~ 1 min
 load("./data_rda/Script5/ArchR_EHB_RG.rda")
@@ -182,7 +47,7 @@ gene_score_matrix <- getMatrixFromProject(ArchR_EHB_RG, useMatrix = "GeneScoreMa
 gene_scores <- assay(gene_score_matrix)
 gene_scores <- as.matrix(gene_scores)
 rownames(gene_scores) <- gene_score_matrix@elementMetadata@listData[["name"]]
-seurat_RG <- CreateSeuratObject(counts = gene_scores, assay = "ATAC")
+seurat_RG <- CreateSeuratObject(data = gene_scores, assay = "ATAC")
 
 # add metadata
 seurat_RG <- AddMetaData(seurat_RG, metadata = as.data.frame(colData(gene_score_matrix)))
@@ -191,31 +56,31 @@ gc()
 
 # scale data
 ## no need to run NormalizeData(), keep gene score - already normalised
-seurat_RG <- ScaleData(seurat_RG, layer = "counts")  # layer = "data"
-seurat_RG # 24961 genes, 22311 cells
-## no need to run FindVariableFeatures(), use all genes, because top variable genes are too noisy (non-coding RNA)
+## no need to run FindVariableFeatures(), because top variable genes are too noisy (non-coding RNA) -> uses all genes for scaling and downstream
+seurat_RG <- ScaleData(seurat_RG)  # gene-wise z-scoring
+seurat_RG # 24961 genes, 22311 cells, scale.data contains all genes
 ```
 
 ```{r}
 set.seed(100)
 
-# PCA ~ 3 min
+# PCA
 seurat_RG <- RunPCA(seurat_RG, features = rownames(seurat_RG))
-ElbowPlot(seurat_RG)
 
-# batch correction ~ 20s
+# true dimensionality = 10
+ElbowPlot(seurat_RG, ndims = 50)
+
+# batch correction for sequencing chemistry ~ 20s
 seurat_RG@meta.data[["batch"]] <- "scATAC"
 seurat_RG@meta.data[["batch"]][seurat_RG@meta.data[["ID"]] == "FB-16"] <- "multiome"
-seurat_RG <- RunHarmony(object = seurat_RG, group.by.vars = "batch")
+seurat_RG <- RunHarmony(seurat_RG, group.by.vars = "batch")
 
 # UMAP ~ 15s
-seurat_RG <- RunUMAP(seurat_RG, dims = 1:30, reduction = "harmony", spread = 0.5)
+seurat_RG <- RunUMAP(seurat_RG, dims = 1:30, reduction = "harmony")
 ```
 
-
-## (2) UMAP
 ### main fig - basic UMAP
-```{r}
+```{r, fig.width=5, fig.height=4, dpi=300}
 # age
 DimPlot(seurat_RG, reduction = "umap", group.by = "Age", shuffle = TRUE,
         cols = c(CS14="#704D9E", CS16="#BC5AA9", CS17="#ED7C97", CS20="#f79452", CS21="#f2de5c")) + 
@@ -230,111 +95,17 @@ DimPlot(seurat_RG, reduction = "umap", group.by = "Region", shuffle = TRUE,
   theme(axis.line = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), axis.title = element_blank())
 ```
 
-### supp fig - UMAP age split region
 ```{r}
-p <- list()
-for (x in c("Forebrain","CerebellumPons","Medulla")){
-  seurat_RG$highlight <- ifelse(seurat_RG$Region == x, seurat_RG$Age, "Other")
-  p[[x]] <- DimPlot(seurat_RG, reduction = "umap", group.by = "highlight", shuffle = TRUE,
-          cols = c(CS14="#704D9E", CS16="#BC5AA9", CS17="#ED7C97", CS20="#f79452", CS21="#f2de5c", Other="lightgrey")) + 
-    coord_fixed(ratio = 1) + 
-    theme(axis.line = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), axis.title = element_blank())  
-  rm(x)
-}
-
-p[["Forebrain"]]
-p[["CerebellumPons"]]
-p[["Medulla"]]
+# ZEB2
+FeaturePlot(seurat_RG, features = "ZEB2", max.cutoff = 3, coord.fixed = 1)
 ```
-
-
-### supp fig - PERMANOVA
-```{r}
-# extract UMAP coordiniates
-UMAP_coord <- as.data.frame(seurat_RG@reductions[["umap"]]@cell.embeddings)
-sum(row.names(UMAP_coord) == names(seurat_RG@active.ident)) == nrow(UMAP_coord)
-UMAP_coord$Age <- seurat_RG$Age
-UMAP_coord$Region <- seurat_RG$Region
-
-# compare ages
-comparison <- data.frame(group1=c("CS14","CS16","CS17","CS20"), group2=c("CS16","CS17","CS20","CS21"))
-
-# downsample to 150
-min(table(UMAP_coord[,c("Age","Region")]))
-
-# PERMANOVA with random down-sampling: seed=123, downsample=150
-set.seed(123)
-results <- data.frame()
-for (x in 1:nrow(comparison)){
-  for (y in c("Forebrain","CerebellumPons","Medulla")){
-    UMAP_coord_down <- UMAP_coord %>% filter(Region == y) %>% 
-      group_by(Age) %>% filter(Age %in% comparison[x,]) %>% 
-      sample_n(min(150, n()), replace = FALSE) # downsample for each age and region, n=100
-    dist_matrix <- dist(UMAP_coord_down[,1:2]) # compute Euclidean distance
-    test <- vegan::adonis2(dist_matrix ~ Age, data = UMAP_coord_down, permutations = 999) # PERMANOVA
-    results <- rbind(results, c(comparison[x,], region=y, R2=test$R2[1], p=test$`Pr(>F)`[1]))  
-  }
-  rm(x, y, UMAP_coord_down, dist_matrix, test)
-}
-```
-
-```{r}
-library(ggraph)
-
-# forebrain
-trial <- results[results$region=="Forebrain",]
-names(trial)[1:2] <- c("source","target")
-ggraph(trial, layout="linear") +
-  geom_edge_arc(edge_colour=rep(c(CS14="#704D9E", CS16="#BC5AA9", CS17="#ED7C97", CS20="#f79452"), each=100), 
-                edge_alpha=0.5, edge_width=5*rep(trial$R2/max(trial$R2),each=100)) +
-  geom_node_point(color=c(CS14="#704D9E", CS16="#BC5AA9", CS17="#ED7C97", CS20="#f79452", CS21="#f2de5c"), size=5) +
-  geom_node_text(aes(label=name), size=8, nudge_y=-0.03,
-                 color=c(CS14="#704D9E", CS16="#BC5AA9", CS17="#ED7C97", CS20="#f79452", CS21="#f2de5c")) +
-  geom_node_text(aes(label=c(paste0("R^2=\n", round(trial$R2,4)),"")),
-                 size=8, nudge_y=0.2, nudge_x=0.5, 
-                 color=c(CS14="#704D9E", CS16="#BC5AA9", CS17="#ED7C97", CS20="#f79452", CS21="#f2de5c")) +
-  theme_void()
-```
-
-```{r}
-# cerebellum pons
-trial <- results[results$region=="CerebellumPons",]
-names(trial)[1:2] <- c("source","target")
-ggraph(trial, layout="linear") +
-  geom_edge_arc(edge_colour=rep(c(CS14="#704D9E", CS16="#BC5AA9", CS17="#ED7C97", CS20="#f79452"), each=100), 
-                edge_alpha=0.5, edge_width=5*rep(trial$R2/max(trial$R2),each=100)) +
-  geom_node_point(color=c(CS14="#704D9E", CS16="#BC5AA9", CS17="#ED7C97", CS20="#f79452", CS21="#f2de5c"), size=5) +
-  geom_node_text(aes(label=name), size=8, nudge_y=-0.03,
-                 color=c(CS14="#704D9E", CS16="#BC5AA9", CS17="#ED7C97", CS20="#f79452", CS21="#f2de5c")) +
-  geom_node_text(aes(label=c(paste0("R^2=\n", round(trial$R2,4)),"")),
-                 size=8, nudge_y=0.2, nudge_x=0.5, 
-                 color=c(CS14="#704D9E", CS16="#BC5AA9", CS17="#ED7C97", CS20="#f79452", CS21="#f2de5c")) +
-  theme_void()
-```
-
-```{r}
-# medulla
-trial <- results[results$region=="Medulla",]
-names(trial)[1:2] <- c("source","target")
-ggraph(trial, layout="linear") +
-  geom_edge_arc(edge_colour=rep(c(CS14="#704D9E", CS16="#BC5AA9", CS17="#ED7C97", CS20="#f79452"), each=100), 
-                edge_alpha=0.5, edge_width=5*rep(trial$R2/max(trial$R2),each=100)) +
-  geom_node_point(color=c(CS14="#704D9E", CS16="#BC5AA9", CS17="#ED7C97", CS20="#f79452", CS21="#f2de5c"), size=5) +
-  geom_node_text(aes(label=name), size=8, nudge_y=-0.03,
-                 color=c(CS14="#704D9E", CS16="#BC5AA9", CS17="#ED7C97", CS20="#f79452", CS21="#f2de5c")) +
-  geom_node_text(aes(label=c(paste0("R^2=\n", round(trial$R2,4)),"")),
-                 size=8, nudge_y=0.2, nudge_x=0.5, 
-                 color=c(CS14="#704D9E", CS16="#BC5AA9", CS17="#ED7C97", CS20="#f79452", CS21="#f2de5c")) +
-  theme_void()
-```
-
 
 ## (3) ctAnnot
 ### clustering
 ```{r}
 # find clusters
-set.seed(123)
-seurat_RG <- FindNeighbors(seurat_RG, reduction = "harmony", dims = 1:16, k.param=50)
+set.seed(100)
+seurat_RG <- FindNeighbors(seurat_RG, reduction = "harmony", dims = 1:10)
 seurat_RG <- FindClusters(seurat_RG, resolution = 0.8, cluster.name = "clusters_0.8")
 seurat_RG <- FindClusters(seurat_RG, resolution = 1, cluster.name = "clusters_1.0")
 seurat_RG <- FindClusters(seurat_RG, resolution = 1.2, cluster.name = "clusters_1.2")
@@ -353,55 +124,43 @@ rm(clustree_df)
 ```
 
 ```{r}
-# nCell per cluster
-View(as.data.frame(table(seurat_RG$clusters_1.2)))
-```
-
-```{r}
 # UMAP
 DimPlot(seurat_RG, reduction = "umap", label = TRUE, repel = TRUE, group.by = c("clusters_1.2"), shuffle = TRUE, raster = FALSE) +
   coord_fixed(ratio = 1) + guides(color = guide_legend(ncol = 3, override.aes = list(size = 3))) +
   theme(axis.line = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), axis.title = element_blank())
 ```
 
-### cluster markers
+### markers
 ```{r}
-# cluster maker genes ~ 25 min
+# nCell per cluster, downsample to 500
+table(seurat_RG$clusters_1.2)
+
+# cluster maker genes ~ 20 min (1 min per cluster)
 Idents(seurat_RG) <- seurat_RG$clusters_1.2
-cluster_markers <- FindAllMarkers(seurat_RG, only.pos = TRUE)
+cluster_markers <- FindAllMarkers(seurat_RG) # use raw gene score
+save(cluster_markers, file = "./data_rda/Script5/cluster_markers.rda")
 ```
 
 ```{r}
-# nGene per cluster
-df <- as.data.frame(table(cluster_markers$cluster))
-names(df) <- c("cluster", "nGene")
-ggplot(df, aes(x = cluster, y = nGene, fill = cluster)) +
-  geom_bar(stat = "identity", position = "dodge") + 
-  theme(legend.position = 'none')
-rm(df)
-```
-
-### ct markers
-```{r}
-# ct marker UMAP
-## - HOPX: oRG
-## - CRYAB: truncated RG
-## - ZEB2: transitioning NE-RG
-## - SOX2/PAX6: high in NE
-## - LMNB1/2: high in early NE
-## - HES1: high in NE and vRG
-## - NFIX: high in oRG
-## - TNC/VIM: RG scaffold & fibre
-## - PROM1: apical RG
-ctMarkers <- c("HOPX","CRYAB","ZEB2","SOX2","PAX6","LMNB1","LMNB2","HES1","NFIX","TNC","VIM","PROM1")
-
-FeaturePlot(seurat_RG, features = ctMarkers, max.cutoff = 2, ncol = 3) + coord_fixed()
+# ct markers
+## - tNE: ZEB2, LMNB1/2, SOX2, PAX6
+## - vRG (and NE): HES1
+## - oRG (apical RG): HOPX, NFIX, PROM1
+## - truncated RG: CRYAB
+ctMarkers <- c("HOPX","CRYAB","ZEB2","SOX2","PAX6","LMNB1","LMNB2","HES1","NFIX","PROM1")
 ```
 
 ```{r}
-# cluster and ct markers, ordered by logFC
-cluster_markers_ct <- cluster_markers[cluster_markers$gene %in% ctMarkers,]
-cluster_markers_ct <- cluster_markers_ct[order(cluster_markers_ct$p_val_adj),]
+# top cluster markers
+cluster_markers_fil <- cluster_markers[cluster_markers$avg_log2FC >= log2(1.5),]
+cluster_markers_fil <- cluster_markers[cluster_markers$p_val_adj <= 0.01,]
+cluster_markers_top <- cluster_markers_fil %>% arrange(p_val_adj) %>% group_by(cluster)  %>% slice(1:5)
+
+# RG subtype markers, ordered by logFC
+cluster_markers_st <- cluster_markers[cluster_markers$gene %in% ctMarkers,]
+cluster_markers_st <- cluster_markers_st[order(cluster_markers_st$p_val_adj),]
+cluster_markers_st <- cluster_markers_st[cluster_markers_st$p_val_adj <= 0.01,]
+cluster_markers_st <- cluster_markers_st[cluster_markers_st$avg_log2FC  >= log2(1.5),]
 
 # cluster marker table
 cluster_info <- data.frame()
@@ -412,13 +171,35 @@ for (x in unique(cluster_markers$cluster)){
                         c(x, sum(seurat_RG$clusters_1.2 == x), # cell count
                         round(mean(as.numeric(sub("CS","",seurat_RG$Age[seurat_RG$clusters_1.2 == x]))),2), # avg age
                         paste0(names(which.max(table(regions))), " (", round(max(table(regions)) / length(regions),3), ")"), # region
-                        paste(cluster_markers_ct$gene[cluster_markers_ct$cluster == x], collapse = " | "))) # ctMarkers
+                        paste(cluster_markers_top$gene[cluster_markers_top$cluster == x], collapse = " | "), # top cluster markers
+                        paste(cluster_markers_st$gene[cluster_markers_st$cluster == x], collapse = " | ") # cell type markers
+                        )) 
   rm(x, regions)
 }
-names(cluster_info) <- c("cluster","cell count","mean age","main region (proportion)","cell type markers")
+names(cluster_info) <- c("cluster","cell count","mean age","main region (proportion)","top cluster markers","RG subtype markers")
 ```
 
-### ct annotation
+
+#### supp fig - marker heatmap
+```{r}
+# raw gene score
+genescore_ctmarker <- AverageExpression(seurat_RG, assays = "ATAC", layer = "counts", group.by = "clusters_1.2", features = ctMarkers)
+genescore_ctmarker <- as.matrix(genescore_ctmarker[[1]])
+colnames(genescore_ctmarker) <- sub("g","cluster_",colnames(genescore_ctmarker))
+Heatmap(t(genescore_ctmarker), heatmap_legend_param = list(title = "gene score"), column_names_rot = 45,
+        col = colorRamp2(seq(0, 4, length = 4), c("#FFFFBB","#ffa724","#ff8a24","#fc7503")))
+```
+
+```{r}
+# normalised gene score (z-transformed, gene-wise, across all RG cells)
+genescore_ctmarker <- AverageExpression(seurat_RG, assays = "ATAC", group.by = "clusters_1.0", features = ctMarkers)
+genescore_ctmarker <- as.matrix(genescore_ctmarker[[1]])
+colnames(genescore_ctmarker) <- sub("g","cluster_",colnames(genescore_ctmarker))
+Heatmap(t(genescore_ctmarker), heatmap_legend_param = list(title = "normalised\ngene score"), column_names_rot = 45)
+```
+
+
+### add annotation
 ```{r}
 # import annotation
 ctAnnot <- readxl::read_excel("./data_output/Script5_ctAnnotation/ctAnnot_ATAC_RG.xlsx", sheet = 1)
@@ -435,16 +216,20 @@ seurat_RG$ctAnnot_RG <- stri_replace_all_regex(seurat_RG$ctAnnot_RG,
                               pattern = ctAnnot$Cluster, 
                               replacement = ctAnnot$Subtype,
                               vectorize = FALSE)
+seurat_RG$ctAnnot_RG <- factor(seurat_RG$ctAnnot_RG, levels = c("tRG","oRG","vRG","tNE"))
 rm(ctAnnot)
-
-# UMAP
-seurat_RG$ctAnnot_RG <- factor(seurat_RG$ctAnnot_RG, levels = c("tRG", "oRG", "vRG","tNE"))
-DimPlot(seurat_RG, reduction = "umap", group.by = c("ctAnnot_RG"),
-        cols = c(tNE="#463C91",vRG="#5E4CE6",oRG="#9E8FFF",tRG="#BFB6FA")) +
-  coord_fixed(ratio = 1) + 
-  theme(axis.line = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), axis.title = element_blank())
 ```
 
+
+## ----- save Seurat -----
+```{r}
+# save ~ 5 min
+save(seurat_RG, file = "./data_rda/Script5/seurat_RG_raw.rda")
+```
+
+
+## (4) sanity check
+### main fig - ct trend
 ```{r}
 # ct trend plot
 annot_summary <- data.frame()
@@ -462,9 +247,11 @@ names(annot_summary) <- c("Age", "Region", "Subtype", "nCell", "Proportion")
 annot_summary$nCell <- as.numeric(annot_summary$nCell)
 annot_summary$Proportion <- as.numeric(annot_summary$Proportion)
 annot_summary$Region <- factor(annot_summary$Region, levels=c("Forebrain","CerebellumPons","Medulla"))
-annot_summary$Subtype <- factor(annot_summary$Subtype, levels = c("tRG", "oRG", "vRG","tNE"))
+annot_summary$Subtype <- factor(annot_summary$Subtype, levels = c("tRG","oRG", "vRG","tNE"))
 annot_summary$Age <- as.numeric(sub("CS","",annot_summary$Age))
+```
 
+```{r, fig.width=6, fig.height=2, dpi=300}
 # plot
 ggplot(annot_summary, aes(x=Age, y=Proportion, fill=Subtype, pattern = Subtype)) + 
   facet_wrap(~Region) + geom_area() +
@@ -475,14 +262,109 @@ ggplot(annot_summary, aes(x=Age, y=Proportion, fill=Subtype, pattern = Subtype))
   scale_fill_manual(values = c(tNE="#463C91",vRG="#5E4CE6",oRG="#9E8FFF",tRG="#BFB6FA"))
 ```
 
-## save Seurat (raw)
-```{r}
-# save ~ 5 min
-save(seurat_RG, cluster_markers, file = "./data_rda/Script5/seurat_RG_raw.rda")
+
+### main fig - UMAP
+```{r, fig.width=5, fig.height=4, dpi=300}
+# cell type
+DimPlot(seurat_RG, reduction = "umap", group.by = c("ctAnnot_RG"),
+        cols = c(tNE="#463C91",vRG="#5E4CE6",oRG="#9E8FFF",tRG="#BFB6FA")) +
+  coord_fixed(ratio = 1) + 
+  theme(axis.line = element_blank(), axis.text = element_blank(), axis.ticks = element_blank(), axis.title = element_blank())
 ```
 
 
-# 3. hdWGCNA
+
+# 2. Trajectory
+```{r}
+load("./data_rda/Script5/ArchR_EHB_RG.rda")
+addArchRThreads(8)
+set.seed(100)
+```
+
+## (1) preparation
+```{r}
+# ArchR add ct
+ctAnnot <- seurat_RG_processed$ctAnnot_RG
+ctAnnot <- ctAnnot[getCellNames(ArchR_EHB_RG)]
+sum(names(ctAnnot) == getCellNames(ArchR_EHB_RG)) == length(ctAnnot)
+ArchR_EHB_RG$ctAnnot_RG <- ctAnnot
+
+# ArchR add harmony-corrected PCA space
+reduction_harmony <- seurat_RG_processed@reductions[["harmony"]]@cell.embeddings
+reduction_harmony <- reduction_harmony[getCellNames(ArchR_EHB_RG),]
+sum(row.names(reduction_harmony) == getCellNames(ArchR_EHB_RG)) == nrow(reduction_harmony)
+ArchR_EHB_RG@reducedDims$Harmony_RG <- ArchR_EHB_RG@reducedDims$Harmony_age
+ArchR_EHB_RG@reducedDims$Harmony_RG$matDR <- reduction_harmony
+ArchR_EHB_RG@reducedDims$Harmony_RG$params <- NULL
+ArchR_EHB_RG@reducedDims$Harmony_RG$date <- Sys.time()
+
+# ArchR add UMAP
+umap <- seurat_RG_processed@reductions[["umap"]]@cell.embeddings
+umap <- as.data.frame(umap[getCellNames(ArchR_EHB_RG),])
+ArchR_EHB_RG <- addUMAP(ArchR_EHB_RG, reducedDims = "Harmony_RG", name = "UMAP_RG", force = TRUE)
+ArchR_EHB_RG@embeddings@listData[["UMAP_RG"]]@listData[["df"]] <- umap
+names(ArchR_EHB_RG@embeddings@listData[["UMAP_RG"]]@listData[["df"]]) <- c("Harmony_RG#UMAP_Dimension_1","Harmony_RG#UMAP_Dimension_2")
+plotEmbedding(ArchR_EHB_RG, colorBy = "cellColData", name = "ctAnnot_RG", embedding = "UMAP_RG",  labelMeans=FALSE,
+              pal = c(tNE="#463C91",vRG="#5E4CE6",oRG="#9E8FFF",tRG="#BFB6FA"))
+
+rm(ctAnnot, reduction_harmony, umap)
+gc()
+```
+
+```{r}
+# region-specific UMAP
+ArchR_lineage_RG <- list()
+for (x in unique(ArchR_EHB_RG$Region)){
+  print(x)
+  ArchR_lineage_RG[[x]] <- ArchR_EHB_RG[ArchR_EHB_RG$Region == x,]
+  ArchR_lineage_RG[[x]]@projectMetadata@listData[["outputDirectory"]] <- "./ArchR_lineage/RG"
+  
+  # add UMAP
+  ArchR_lineage_RG[[x]] <- addUMAP(ArchR_lineage_RG[[x]], reducedDims = "Harmony_RG",name = "UMAP_RG_rg", 
+                                   nNeighbors = 30, minDist = 1, metric = "cosine", force = TRUE)
+  
+  # save UMAP plots
+  plotPDF(plotEmbedding(ArchR_lineage_RG[[x]], colorBy = "cellColData", name = "Age", embedding = "UMAP_RG_rg",  labelMeans=FALSE,
+                        pal = c(CS14="#704D9E", CS16="#BC5AA9", CS17="#ED7C97", CS20="#f79452", CS21="#f2de5c")),
+          name = paste0("RG_UMAP_",x,"_Age.pdf"), ArchRProj = ArchR_lineage_RG[[x]], addDOC = FALSE, width = 6, height = 6)
+  plotPDF(plotEmbedding(ArchR_lineage_RG[[x]], colorBy = "cellColData", name = "ctAnnot_RG", embedding = "UMAP_RG_rg",  labelMeans=FALSE,
+                        pal = c(tNE="#463C91",vRG="#5E4CE6",oRG="#9E8FFF",tRG="#BFB6FA")), 
+          name = paste0("RG_UMAP_",x,"_ct.pdf"), ArchRProj = ArchR_lineage_RG[[x]], addDOC = FALSE, width = 6, height = 6)
+  rm(x)
+}
+```
+
+
+## (2) trajectory
+```{r}
+# compute trajectory: tNE → vRG → oRG
+p <- list()
+for (x in names(ArchR_lineage_RG)){
+  # add a trajectory for the given stage on the shared UMAP
+  ArchR_lineage_RG[[x]] <- addTrajectory(ArchRProj = ArchR_lineage_RG[[x]], name = x, groupBy = "ctAnnot_RG", reducedDims = "Harmony_RG",
+                               trajectory = c("tNE","vRG","oRG"), embedding = "UMAP_RG_rg",
+                               preFilterQuantile = 0.95, postFilterQuantile = 0.95, force = TRUE, spar = 1.5)
+  plot <- plotTrajectory(ArchR_lineage_RG[[x]], embedding = "UMAP_RG_rg", trajectory = x, colorBy = "cellColData", name = x,
+                         plotAs = "points", continuousSet = "solarExtra")
+  p[[x]] <- plot[[1]]
+  rm(x)
+}
+
+# saving PDF
+pdf("./ArchR_lineage/RG/Plots/RG_trajectory.pdf", width = 3, height = 3.6)
+p
+dev.off()
+```
+
+
+## ----- save ArchR -----
+```{r}
+save(ArchR_lineage_RG, file = "./data_rda/Script5/ArchR_lineage_RG.rda")
+```
+
+
+
+# 3. hdWGCNA - ATAC
 Gene co-accessibility networks
 GitHub for R package: https://github.com/smorabit/hdWGCNA/tree/dev
 Tutorials list: https://smorabit.github.io/hdWGCNA/articles/hdWGCNA.html
@@ -495,14 +377,6 @@ Project RNA-seq to ATAC-seq:
 
 ## (1) hdWGCNA
 ### run WGCNA
-```{r
-# use the 2000 variable genes for WGCNA, no ZEB2 >>> saved as "seurat_RG_var2000"
-seurat_RG <- SetupForWGCNA(seurat_RG, wgcna_name = "RG_gene_networks", gene_select = "variable")
-"ZEB2" %in% seurat_RG@misc[["RG_gene_networks"]][["wgcna_genes"]]
-
-# top 20000 variable genes do NOT contain ZEB2 either (whichever selection.method I use for FindVariableFeatures)
-```
-
 ```{r}
 # use genes that are detected in more than 70% cells ~ 35s
 seurat_RG <- SetupForWGCNA(seurat_RG, wgcna_name = "RG_gene_networks", gene_select = "fraction",  fraction = 0.70)
@@ -520,7 +394,7 @@ seurat_RG <- SetDatExpr(seurat_RG, group.by='Age', group_name = c("CS14","CS16",
 ```
 
 ```{r}
-# test different soft powers ~ 10s
+# test different soft powers
 seurat_RG <- TestSoftPowers(seurat_RG, networkType = 'unsigned')
 p <- PlotSoftPowers(seurat_RG)
 patchwork::wrap_plots(p, ncol=2)                                 
@@ -532,8 +406,8 @@ seurat_RG <- ConstructNetwork(seurat_RG, tom_name = 'RG_gene_networks_', soft_po
 ```
 
 
-### supp fig - dendrogram
-```{r
+#### supp fig - dendrogram
+```{r}
 # change light colours
 seurat_RG@misc[["RG_gene_networks"]][["wgcna_modules"]][["color"]] <- 
   stri_replace_all_regex(seurat_RG@misc[["RG_gene_networks"]][["wgcna_modules"]][["color"]],
@@ -568,115 +442,90 @@ seurat_RG <- ModuleConnectivity(seurat_RG,  group.by='Age', group_name = c("CS14
 seurat_RG <- ResetModuleNames(seurat_RG, new_name = "Module_")
 ```
 
-
-### save Seurat (processed)
+#### main fig - network UMAP
 ```{r}
-# delete unused raw data and metadata from Seurat object (14GB -> 7GB)
+# fix TOM location
+seurat_RG_processed@misc[["RG_gene_networks"]][["wgcna_net"]][["TOMFiles"]] <- "./data_rda/Script5/RG_gene_networks__TOM.rda"
+
+# module connection UMAP
+set.seed(100)
+seurat_RG_processed <- RunModuleUMAP(seurat_RG_processed, n_hubs = 15, n_neighbors=10, min_dist=1)
+```
+
+```{r, fig.width=12, fig.height=6, dpi=300, message=FALSE}
+# plot UMAP ~ 45s
+ModuleUMAPPlot(seurat_RG_processed, label_hubs = 0)
+```
+
+```{r, fig.width=8, fig.height=5, dpi=300}
+# legend (colour for each module)
+umap_df <- GetModuleUMAP(seurat_RG_processed)
+umap_df$module <- paste0("M",sub(".*_","",umap_df$module))
+umap_df$module <- factor(umap_df$module, levels=paste0("M",1:length(unique(umap_df$module))))
+ggplot(umap_df, aes(x=UMAP1, y=UMAP2, colour=module)) + 
+  geom_point() + scale_color_manual(values = unique(umap_df$color)) + 
+  theme_minimal() + guides(colour = guide_legend(override.aes = list(size = 5), ncol = 6)) +
+  BuenColors::pretty_plot() + coord_fixed(ratio = 1.5) +
+  theme(legend.text = element_text(size = 16), legend.position = "bottom") 
+rm(umap_df)
+```
+
+
+```{r}
+# module correlagram
+suppressWarnings(ModuleCorrelogram(seurat_RG_processed))
+```
+
+## --- save Seurat (network) ---
+```{r}
+# delete unused raw data and metadata from Seurat object (15GB -> 7GB)
 seurat_RG@assays[["ATAC"]]@layers <- list()
+seurat_RG_processed <- seurat_RG
+rm(seurat_RG)
 gc()
 
 # save ~ 5 min
-save(seurat_RG, file = "./data_rda/Script5/seurat_RG_processed.rda")
-```
-
-
-### (network plots)
-```{r
-# plot genes ranked by kME for each module
-PlotKMEs(seurat_RG, ncol=6, text_size = 2.5, n_hubs = 10)
-```
-
-```{r
-# module feature plot
-p <- ModuleFeaturePlot(seurat_RG, features='hMEs', order=TRUE)
-wrap_plots(p, ncol=6)
-rm(p)
-```
-
-```{r
-# fix "ModuleRadarPlot" function: maximum = 100%
-source("./R_functions/Script5_ModuleRadarPlot.R")
-
-# relative expression level of each module across age
-png("./ArchR_EHB/Plots/Script5/WGCNA/radar_age.png", width = 2000, height = 1500, res = 65)
-ModuleRadarPlot(seurat_RG, group.by = 'Age', barcodes = rownames(seurat_RG@meta.data), axis.label.size=8, grid.label.size=8)
-dev.off()
-
-# relative expression level of each module across age-region
-png("./ArchR_EHB/Plots/Script5/WGCNA/radar_ID.png", width = 2000, height = 1500, res = 70)
-ModuleRadarPlot(seurat_RG, group.by = 'ID', barcodes = rownames(seurat_RG@meta.data), axis.label.size=6, grid.label.size=7)
-dev.off()
-
-rm(ModuleRadarPlot)
-```
-
-```{r
-# module correlagram
-suppressWarnings(ModuleCorrelogram(seurat_RG))
-```
-
-### supp fig - network
-```{r}
-# fix TOM location
-seurat_RG@misc[["RG_gene_networks"]][["wgcna_net"]][["TOMFiles"]] <- "./data_rda/Script5/RG_gene_networks__TOM.rda"
-
-# module connection UMAP ~ 5-50s (clean R session)
-set.seed(100)
-seurat_RG <- RunModuleUMAP(seurat_RG, n_hubs = 15, n_neighbors=10, min_dist=1)
-
-png("./ArchR_EHB/Plots/Script5/WGCNA/connection_UMAP.png", width = 1200, height = 900, res = 160)
-ModuleUMAPPlot(seurat_RG, label_hubs = 0)
-dev.off()
-```
-
-```{r}
-# get legend (colour for each module)
-umap_df <- GetModuleUMAP(seurat_RG)
-umap_df$module <- sub(".*_","",umap_df$module)
-umap_df$module <- factor(umap_df$module, levels=1:length(unique(umap_df$module)))
-
-ggplot(umap_df, aes(x=UMAP1, y=UMAP2, colour=module)) + 
-  geom_point() + scale_color_manual(values = unique(umap_df$color)) + 
-  theme_minimal() + guides(colour = guide_legend(override.aes = list(size = 5), nrow = 6)) +
-  BuenColors::pretty_plot() + coord_fixed(ratio = 1.5) +
-  theme(legend.text = element_text(size = 14), legend.title = element_text(size = 14), legend.position = "bottom") 
-rm(umap_df)
+save(seurat_RG_processed, file = "./data_rda/Script5/seurat_RG_processed.rda")
 ```
 
 
 ## (2) differential accessibility
 ```{r}
 # get colour ref
-modules <- GetModules(seurat_RG) %>% subset(module != 'grey')
+modules <- GetModules(seurat_RG_processed) %>% subset(module != 'grey')
 colour_ref <- unique(modules[,2:3])
 row.names(colour_ref) <- NULL
 colour_ref$module <- sub("_","-",colour_ref$module)
+```
 
+```{r, warning=FALSE}
 # differential accessible MODULES, split region
 p <- list()
 summary <- list()
 for (y in c("CS16_CS14", "CS17_CS16")){
-  for (x in unique(seurat_RG@meta.data$Region)){
-    DME <- FindDMEs(seurat_RG, test.use='wilcox',
-                    barcodes1 = seurat_RG@meta.data %>% subset(Age==sub("_.*","",y) & Region==x) %>% rownames,
-                    barcodes2 = seurat_RG@meta.data %>% subset(Age==sub(".*_","",y) & Region==x) %>% rownames)
+  summary[[y]] <- list()
+  for (x in unique(seurat_RG_processed@meta.data$Region)){
+    DME <- FindDMEs(seurat_RG_processed, test.use='wilcox',
+                    barcodes1 = seurat_RG_processed@meta.data %>% subset(Age==sub("_.*","",y) & Region==x) %>% rownames,
+                    barcodes2 = seurat_RG_processed@meta.data %>% subset(Age==sub(".*_","",y) & Region==x) %>% rownames)
     DME <- DME[order(DME$avg_log2FC),]
+    DME$colour <- colour_ref$color[order(match(colour_ref$module, DME$module))]
+    DME$module <- sub("Module-","M",DME$module)
     DME$module <- factor(DME$module, levels = DME$module)
     DME$result <- "non-significant"
-    DME$result[DME$p_val_adj < 0.01 & DME$avg_log2FC >= 0.6] <- "hyper-accessible"
-    DME$result[DME$p_val_adj < 0.01 & DME$avg_log2FC <= -0.6] <- "hypo-accessible"
-    DME$colour <- colour_ref$color[order(match(colour_ref$module, DME$module))]
-    summary[[x]] <- DME
+    DME$result[DME$p_val_adj < 0.01 & DME$avg_log2FC >= 2] <- "hyper-accessible"
+    DME$result[DME$p_val_adj < 0.01 & DME$avg_log2FC <= -2] <- "hypo-accessible"
+    summary[[y]][[x]] <- DME
     
     x <- stri_replace_all_regex(x, pattern = c("Forebrain","Medulla","CerebellumPons"), 
                                 replacement = c("FB","MD","CP"), vectorize_all = FALSE)
-    p[[paste0(x,"_",y)]] <- ggplot(DME, aes(y=module, x=avg_log2FC, size=3, color=module, shape = result)) +
+    p[[paste0(x,"_",y)]] <- ggplot(DME, aes(y=module, x=avg_log2FC, color=module, shape = result)) +
       geom_vline(xintercept=0, color='black') + 
       geom_segment(aes(y=module, yend=module, x=0, xend=avg_log2FC), linewidth=0.5, alpha=0.3) +
-      geom_point() + guides(shape = guide_legend(override.aes = list(size = 5)), color = "none", size = "none") +
+      geom_point(size=3) + # guides(shape = guide_legend(override.aes = list(size = 5)), color = "none", size = "none") +
       scale_shape_manual(values = c("hyper-accessible"=19, "hypo-accessible"=17, "non-significant"=13)) +
       scale_color_manual(values=DME$colour[])  + scale_x_continuous(oob = squish) + BuenColors::pretty_plot() +
-      ylab('') + xlab(bquote("Avg. log"[2]~"(Fold Change)")) + 
+      ylab('') + xlab(bquote("Avg. log"[2]~"(Fold Change)")) + labs(shape = "") +
       ggtitle(paste0(sub("_.*","",y), " vs ", sub(".*_","",y)," in ", x)) +
       theme(axis.line.y = element_blank(), axis.ticks.y = element_blank(), 
             axis.text.y = element_text(size=11), axis.text.x = element_text(size=11),
@@ -686,20 +535,26 @@ for (y in c("CS16_CS14", "CS17_CS16")){
 }
 ```
 
+### main fig - forebrain
+```{r, fig.width=8, fig.height=4.5, dpi=300}
+# legend
+p[[1]] + theme(legend.position = "bottom") + guides(shape = guide_legend(override.aes = list(size = 5)), color = "none", size = "none")
+```
+
+```{r, fig.width=5, fig.height=4.5, dpi=300}
+# forebrain
+wrap_plots(p[c(1,4)], ncol=2) + plot_layout(guides = "collect")
+```
 
 ### supp fig - hindbrain
 ```{r}
+# hindbrain
 wrap_plots(p[c("CP_CS16_CS14","CP_CS17_CS16","MD_CS16_CS14","MD_CS17_CS16")], ncol=4)
 ```
 
-### main fig - forebrain
-```{r}
-wrap_plots(p[c(1,4)], ncol=2)
-```
 
-
-## (3) module member genes
-### gene groups for each module
+## (3) selected modules
+### module member genes
 ```{r}
 # get gene locations
 load("./data_rda/Script5/ArchR_EHB_RG.rda")
@@ -725,7 +580,9 @@ for (x in unique(modules$module)){
   rm(x, i, distance)  
 }
 rm(gene_location)
+```
 
+```{r}
 # how many groups are there in each module?
 df <- data.frame()
 for (x in names(module_genes)){
@@ -736,9 +593,8 @@ names(df) <- c("module","nGroup")
 df$module <- factor(df$module, levels=df$module)
 df$nGroup <- as.numeric(df$nGroup)
 
-# var2000 - only have one gene group: "Module_1","Module_4","Module_10"
-#df[df$nGroup==1,]
-summary(df$nGroup) # lowest nGene = 9, good
+# Module_28 only has one gene group
+summary(df$nGroup)
 
 # plotting
 ggplot(df, aes(x=module, y=nGroup, fill=module)) + 
@@ -762,72 +618,9 @@ save(modules, file = "./data_rda/Script5/WGCNA_modules.rda")
 ```
 
 
-### circular plot
-```{r
-# keep top 20 genes
-module_genes_top <- list()
-for (x in names(module_genes)){
-  module_genes_top[[x]] <- na.omit(module_genes[[x]][1:20,])
-  rm(x)
-}
-
-# plotting!
-p <- list()
-for (x in names(module_genes_top)){
-  # add 'empty bar' at the end of each group
-  data <- module_genes_top[[x]][,c("symbol","group","kME")]
-  to_add <- data.frame(matrix(NA, length(unique(data$group)), ncol(data)))
-  colnames(to_add) <- colnames(data)
-  to_add$group <- rep(unique(data$group), each=1)
-  data <- rbind(data, to_add)
-  data <- data %>% arrange(group)
-  data$id <- seq(1, nrow(data))
-  
-  # Get the name and the y position of each label
-  label_data <- data
-  number_of_bar <- nrow(label_data)
-  angle <- 90 - 360 * (label_data$id-0.5) /number_of_bar
-  label_data$hjust <- ifelse( angle < -90, 1, 0)
-  label_data$angle <- ifelse(angle < -90, angle+180, angle)
-   
-  # Make the plot
-  p[[x]] <- ggplot(data, aes(x=as.factor(id), y=kME, fill=as.factor(group))) +
-    geom_bar(stat="identity", alpha=0.8) +
-    ylim(-0.2,1) + theme_minimal() + coord_polar() + ggtitle(x) +
-    theme(plot.title = element_text(size = 9, hjust = 0.5, vjust = 0, face = "bold"), legend.position = "none", 
-          axis.text = element_blank(), axis.title = element_blank(), panel.grid = element_blank()) +
-    geom_text(data=label_data, aes(x=id, y=kME+0.08, label=symbol, hjust=hjust), alpha=0.6, size=2, angle=label_data$angle, inherit.aes=FALSE)
-  
-  rm(x, data, to_add, label_data, number_of_bar, angle)
-}
-
-png("./ArchR_EHB/Plots/Script5/WGCNA/circle.png", width = 3200, height = 1800, res = 300)
-wrap_plots(p, ncol=6)
-dev.off()
-
-#rm(p, module_genes_top)
-```
-
-
-### radar plot
-```{r}
-select <- c("Module_1", "Module_2", "Module_14", "Module_18")
-
-# fix "ModuleRadarPlot" function: maximum = 100%
-source("./R_functions/Script5_ModuleRadarPlot.R")
-
-# plotting
-p <- ModuleRadarPlot(seurat_RG, group.by = 'ID', combine = FALSE, barcodes = rownames(seurat_RG@meta.data), 
-                     axis.label.size=6, grid.label.size=7)
-wrap_plots(p[names(p) %in% select], ncol = 2)
-
-rm(p)
-```
-
-
 ### main fig - circular plot
 ```{r}
-# keep all genes for selected modules of interest genes
+# genes in selected modules of interest
 module_genes_top <- list()
 for (x in select){
   print(nrow(module_genes[[x]]))
@@ -873,8 +666,6 @@ rm(module_genes_top)
 ```
 
 
-
-## (4) ZEB2 unbiased approach
 ### supp fig - GO, ZEB2 module
 ```{r}
 # GO enrichment ~ 30s
@@ -963,626 +754,120 @@ rm(GO, semData, p, trial, result)
 ### main fig - RG UMAP
 hMEs: projected module eigengenes per individual single cell
 ```{r}
+select <- c("Module_1","Module_2","Module_14","Module_18")
 p <- list()
 for (x in select){
-  p[[x]] <- ModuleFeaturePlot(seurat_RG, module_names=x, features='hMEs', order=TRUE)
+  p[[x]] <- ModuleFeaturePlot(seurat_RG_processed, module_names=x, features='hMEs', order=TRUE)
   rm(x)
 }
+```
 
+```{r, fig.width=2, fig.height=2, dpi=300}
 p[[4]]
 ```
 
 
-### main fig - module accessibility
-```{r
-load("./data_rda/Script5/seurat_RG_processed.rda")
-load("./data_rda/Script5/ArchR_EHB_RG.rda")
-modules <- GetModules(seurat_RG) %>% subset(module != 'grey')
-ZEB2_module <- as.character(modules$module[modules$gene_name == "ZEB2"])
-```
-
-```{r
-# get hME data
-hME_df <- data.frame("hME"=seurat_RG@misc[["RG_gene_networks"]][["hMEs"]][[ZEB2_module]],
-                     "Region"=seurat_RG$Region, "Age"=seurat_RG$Age)
-```
-
-#### vRG only
-```{r
-# add RG subtype annot
-ctAnnot <- readxl::read_excel("./data_output/Script5_ctAnnotation/ctAnnot_ATAC_RG.xlsx", sheet = 1)
-ctAnnot <- ctAnnot[,c("Cluster","Subtype")]
-ctAnnot$Cluster <- paste0("C",ctAnnot$Cluster)
-sum(rownames(hME_df) == colnames(seurat_RG)) == nrow(hME_df)
-
-hME_df$ctAnnot_RG <- paste0("C",seurat_RG$clusters_1.2)
-hME_df$ctAnnot_RG <- stri_replace_all_regex(hME_df$ctAnnot_RG,
-                              pattern = ctAnnot$Cluster[!ctAnnot$Cluster %in% c("C1")], 
-                              replacement = ctAnnot$Subtype[!ctAnnot$Cluster %in% c("C1")],
-                              vectorize = FALSE)
-hME_df$ctAnnot_RG <- stri_replace_all_regex(hME_df$ctAnnot_RG, 
-                              pattern = ctAnnot$Cluster, 
-                              replacement = ctAnnot$Subtype,
-                              vectorize = FALSE)
-hME_df$Region <- factor(hME_df$Region, levels = c("Forebrain","CerebellumPons","Medulla"))
-rm(ctAnnot)
+### main fig - accessibility pseudotime
+```{r}
+load("./data_rda/Script5/ArchR_lineage_RG.rda")
 ```
 
 ```{r}
-load("./data_rda/Script5/module_18_accessibility.rda")
-
-ggplot(hME_df[hME_df$ctAnnot_RG=="vRG",], aes(x=Age, y=hME, fill=Age)) + facet_wrap(~Region, ncol=1) +
-  geom_violin() + xlab("") + BuenColors::pretty_plot() +
-  scale_fill_manual(values = c(CS14="#704D9E", CS16="#BC5AA9", CS17="#ED7C97", CS20="#f79452", CS21="#f2de5c")) +
-  ggtitle("Single-cell module accessibility for module 18, vRG")
-```
-
-#### all RG
-```{r
-# differential analysis comparing adjacent timepoints ~ 3.3 min
-comparisons <- c("CS14_CS16", "CS16_CS17", "CS17_CS20", "CS20_CS21")
-df <- data.frame()
-for (x in comparisons){
-  for (y in unique(ArchR_EHB_RG$Region)){
-    trial <- getMarkerFeatures(ArchR_EHB_RG[ArchR_EHB_RG$Region==y,], useMatrix = "GeneScoreMatrix", 
-                    groupBy = "Age", useGroups = sub("_.*","",x), bgdGroups = sub(".*_","",x),
-                    bias = c("TSSEnrichment", "log10(nFrags)"), testMethod = "wilcoxon", k = 100, maxCells = 2000)
-    marker <- data.frame(getMarkers(trial, cutOff = "FDR <= 1"))
-    df <- rbind(df, cbind(y, x, marker[marker$name=="ZEB2",]))
+hME_summary <- list()
+subtype <- list()
+for (x in names(ArchR_lineage_RG)){
+  # pseudotime bins
+  pseudotime <- data.frame(cellID = getCellNames(ArchR_lineage_RG[[x]]), 
+                           pseudotime = ArchR_lineage_RG[[x]]@cellColData@listData[[x]],
+                           celltype = ArchR_lineage_RG[[x]]$ctAnnot_RG)
+  pseudotime <- pseudotime[!is.na(pseudotime$pseudotime),]
+  pseudotime$bin <- pmin(floor(pseudotime$pseudotime) + 1, 100)
+  
+  hME_summary[[x]] <- data.frame()
+  subtype[[x]] <- data.frame()
+  for(y in 1:100){
+    # avg cell type for each pseudotime bin 
+    subtype[[x]] <- rbind(subtype[[x]], c(bin=y, celltype=names(which.max(table(pseudotime$celltype[pseudotime$bin==y])))))
     
+    # avg hMEs for each pseudotime bin
+    hME <- seurat_RG_processed@misc$RG_gene_networks$hMEs[pseudotime[pseudotime$bin==y,]$cellID,] # harmonised MEs
+    hME <- colMeans(hME[names(hME)!="grey"])
+    hME_summary[[x]] <- rbind(hME_summary[[x]], c(bin=y,hME))
   }
-  rm(x, y, trial, marker)
+  names(subtype[[x]]) <- c("bin","subtype")
+  subtype[[x]]$bin <- as.numeric(subtype[[x]]$bin)
+  names(hME_summary[[x]]) <- c("bin",names(hME))
+  rm(x, y, pseudotime, hME)
 }
-names(df)[1:2] <- c("Region","comparison")
-
-# formatting
-df$x <- rep(c(1.5, 2.5, 3.5, 4.5),each=3)
-df$y <- 14.5
-df$y_line <- 12
-df$x_start <- df$x - 0.4
-df$x_end <- df$x + 0.4
-df$Region <- factor(df$Region, levels = c("Forebrain","CerebellumPons","Medulla"))
 ```
 
 ```{r}
-load("./data_rda/Script5/module_18_accessibility.rda")
-
-ggplot(hME_df, aes(x=Age, y=hME, fill=Age)) + facet_wrap(~Region, ncol=1) +
-  geom_violin() + xlab("") + BuenColors::pretty_plot() +
-  scale_fill_manual(values = c(CS14="#704D9E", CS16="#BC5AA9", CS17="#ED7C97", CS20="#f79452", CS21="#f2de5c")) +
-  ggtitle("Single-cell module accessibility for module 18") +
-  theme(legend.position = "none", plot.title = element_text(size=10)) + ylim(min(hME_df$hME),16) +
-  geom_text(data = df, aes(x = x, y = y, label = -round(Log2FC, 2)), inherit.aes = FALSE, size = 3) +
-  geom_segment(data = df, aes(x = x_start, xend = x_end, y = y_line, yend = y_line), inherit.aes = FALSE)
-```
-
-#### save
-```{r}
-save(hME_df, df, file = "./data_rda/Script5/module_18_accessibility.rda")
-```
-
-
-## (5) M18 ~ ZEB2 heatmap
-### supp fig - GS-GS heatmap
+# plot: pseudotime bins
+p0 <- list()
+smooth <- 1
+for (x in names(subtype)){
+  # smooth across bins
+  subtype_smooth <- subtype[[x]]
+  subtype_smooth$subtype <- factor(subtype_smooth$subtype, levels = c("tNE","vRG","oRG"))
+  for (bin in 1:100/smooth){
+    subtype_smooth$subtype[subtype_smooth$bin >= bin*100/smooth-smooth+1 & subtype_smooth$bin <= bin*smooth] <- 
+      names(which.max(table(subtype_smooth$subtype[subtype_smooth$bin >= bin*smooth-4 & subtype_smooth$bin <= bin*smooth])))
+  }
   
-Manually modify and re-run code to get:
-  *all cells*: not applying downsample
-  *downsample* to 150
-
-downsample <- sample(colnames(fil), min(150,ncol(fil)), replace = FALSE) # downsample to n=150
-
-```{r}
-# ZEB2 co-accessible genes (same module)
-load("./data_rda/Script5/WGCNA_modules.rda")
-genes_ZEB2_coAccess <- modules[modules$module=="Module_18", c("gene_name","module","color","kME_Module_18")]
-genes_ZEB2_coAccess <- genes_ZEB2_coAccess[order(genes_ZEB2_coAccess$kME_Module_18, decreasing = TRUE),]
-nrow(genes_ZEB2_coAccess) # 175 co-accessible genes, including ZEB2 and ZEB2-AS1
+  # plot
+  p0[[x]] <- ggplot(subtype_smooth, aes(x=bin, y=0, fill=subtype)) + geom_tile() + 
+    theme_void() + scale_fill_manual(values = c(tNE="#463C91",vRG="#5E4CE6",oRG="#9E8FFF")) +
+    coord_fixed(ratio = 8)
+  rm(x, bin)
+}
+save(p0, file = "./data_rda/script5/p_pseudotime_bin.rda")
 ```
 
 ```{r}
-# GS-GS correlation (should be very high, because they are in the same module)
-## this improves upon hdWGCNA (single cell correlation) by grouping age and region
+# module colours
+modules <- GetModules(seurat_RG_processed) %>% subset(module != 'grey')
+colour_ref <- unique(modules[,2:3])
+row.names(colour_ref) <- NULL
+colour_ref$module <- sub("_","-",colour_ref$module)
+rm(modules)
 
-# get gene score for ZEB2 coAccess genes
-load("./data_rda/Script5/gene_score_matrix_RG.rda")
-load("./data_rda/Script5/ArchR_EHB_RG.rda")
-gene_score_matrix_coAccess <- gene_score_matrix[na.omit(match(genes_ZEB2_coAccess$gene_name, rownames(gene_score_matrix))),]
-gene_score_matrix_coAccess <- assay(gene_score_matrix_coAccess)
-sum(colnames(gene_score_matrix_coAccess) == ArchR_EHB_RG$cellNames) == length(ArchR_EHB_RG$cellNames)
-rm(gene_score_matrix)
-gc()
-```
+# modules of interest
+select <- c("Module_1","Module_2","Module_14","Module_18")
+colour_ref_fil <- colour_ref
+colour_ref_fil$module <- sub("-","_",colour_ref_fil$module)
+colour_ref_fil <- colour_ref_fil[colour_ref_fil$module %in% select,]
+colour_ref_select <- colour_ref_fil$color
+names(colour_ref_select) <- sub("Module_","M",colour_ref_fil$module)
 
-```{r}
-# Spearman's correlation: by age and region
-correlation_table_coAccess <- list()
-for (x in unique(ArchR_EHB_RG$ID)){
-  
-  fil <- gene_score_matrix_coAccess[,ArchR_EHB_RG$ID==x] 
-  downsample <- sample(colnames(fil), min(150,ncol(fil)), replace = FALSE) # downsample to n=150
-  fil <- fil[,downsample]
-  
-  for (y in rownames(gene_score_matrix_coAccess)){
-    out <- cor.test(fil["ZEB2",], fil[y,],method = "spearman")
-    out <- data.frame(p_value = out$p.value, coefficient = out$estimate)  # coefficient = Spearman's rho
-    correlation_table_coAccess[[x]] <- rbind(correlation_table_coAccess[[x]], out)
-  }
-  rownames(correlation_table_coAccess[[x]]) <- rownames(gene_score_matrix_coAccess)
-  correlation_table_coAccess[[x]] <- correlation_table_coAccess[[x]][rownames(correlation_table_coAccess[[x]]) != "ZEB2",]
-  
-  correlation_table_coAccess[[x]]$FDR <- p.adjust(correlation_table_coAccess[[x]]$p_value, method = "BH")
-  correlation_table_coAccess[[x]]$mlog10FDR <- -log10(correlation_table_coAccess[[x]]$FDR)
-  correlation_table_coAccess[[x]]$gene <- rownames(correlation_table_coAccess[[x]])
-  correlation_table_coAccess[[x]]$sample <- x  
-  
-  rm(x, y, fil)
+# plot: hME trends
+p <- list()
+for (x in names(hME_summary)){
+  df <- hME_summary[[x]][,c("bin",select)]
+  df <- pivot_longer(df, cols = 2:5, names_to = "module", values_to = "hME")
+  df$module <- sub("Module_","M",df$module)
+  df$module <- factor(df$module, levels = c("M1","M2","M14","M18"))
+  p[[x]] <- ggplot(df, aes(x=bin, y=hME, colour = module)) +
+    geom_line() + geom_point() + BuenColors::pretty_plot() + # facet_wrap(~module, ncol=2, scales = "free_y") +
+    xlab("Pseudotime") + ylab("hME") + ggtitle(x) +
+    scale_color_manual(values = colour_ref_select) + 
+    theme(plot.title = element_text(size=10))
+  rm(x, df)
 }
 
-# summary
-correlation_summary_coAccess <- do.call(rbind, correlation_table_coAccess)
-rownames(correlation_summary_coAccess) <- NULL
-correlation_summary_coAccess$correlation <- "non-significant"
-correlation_summary_coAccess$correlation[correlation_summary_coAccess$FDR <= 0.01 & correlation_summary_coAccess$coefficient > 0] <- "positive"
-correlation_summary_coAccess$correlation[correlation_summary_coAccess$FDR <= 0.01 & correlation_summary_coAccess$coefficient < 0] <- "negative"
-correlation_summary_coAccess <- correlation_summary_coAccess[order(correlation_summary_coAccess$FDR),]
-correlation_summary_coAccess$region <- sub("-.*","",correlation_summary_coAccess$sample)
-correlation_summary_coAccess$age <- paste0("CS",sub(".*-","",correlation_summary_coAccess$sample))
-#save(correlation_summary_coAccess, file = "./data_rda/Script5/correlation_summary_coAccess.rda")
+# format trend plot
+p[[2]] <- p[[2]] + theme(axis.title.y = element_blank())
+p[[3]] <- p[[3]] + theme(axis.title.y = element_blank())
+for (x in names(p)){p[[x]] <- p[[x]] + theme(plot.margin = margin(0, 1, 0, 1, "mm"), axis.title.x = element_blank())}
+
+# pseudotime annotation
+load("./data_rda/script5/p_pseudotime_bin.rda")
+for (x in names(p0)){p0[[x]] <- p0[[x]] + theme(plot.margin = margin(0, 0, 0, 0, "mm"))}
+p1 <- ggplot() + annotate("text", x=0, y=0, label = "pseudotime",size = 3.5) + theme_void()
+p1 <- list(p1,p1,p1)
 ```
 
-```{r}
-#load("./data_rda/Script5/correlation_summary_coAccess.rda")
-
-# filter: module membership > 20%
-fil <- correlation_summary_coAccess[!grepl("ZEB2",correlation_summary_coAccess$gene),]
-fil <- fil[fil$gene %in% genes_ZEB2_coAccess$gene_name[genes_ZEB2_coAccess$kME_Module_18 > 0.25],]
-fil$sig <- ifelse(fil$correlation=="non-significant", "", "*")
-
-# cluster rows
-mat <- tidyr::pivot_wider(fil[,c("sample","gene","coefficient")], names_from = sample, values_from = coefficient) %>%
-  tibble::column_to_rownames("gene") %>% as.matrix()
-row_clust <- hclust(dist(mat))
-fil <- fil %>% mutate(gene = factor(gene, levels = row_clust$labels[row_clust$order]))
-fil$region <- factor(fil$region, levels = c("FB","CP","MD"))
-fil$gene <- factor(fil$gene, levels=genes_ZEB2_coAccess$gene_name) # order by module membership
-
-# plotting
-ggplot(fil, aes(x=age, y=gene, fill=coefficient)) +
-  geom_tile() + xlab("") + ylab("") + BuenColors::pretty_plot() + facet_wrap(~region, ncol=3) +
-  scale_fill_gradient2(low="blue",mid="white",high="#EE2211") +
-  theme(axis.text.x = element_text(angle=45,hjust=1), legend.position = "bottom") +
-  geom_text(aes(label = sig), size = 4, color = "black",nudge_y=-0.3) +
-  scale_y_discrete(limits = rev)
-```
-
-```{r}
-# ZEB2 upstream (script 6)
-select <- c("SOX2","POU3F2","GBX2","MECOM","EBF1","TCF4","MEIS1","BCL11B")
-select[select %in% fil$gene]
-```
-
-
-
-
-# 4. ZEB2 pattern
-```{r}
-library(Seurat)
-```
-
-## (1) our data (ATAC)
-```{r}
-load("./data_rda/Script4/ArchR_EHB.rda")
-```
-
-### All cells (75K)
-```{r
-# plot geneScore UMAP
-p <- plotEmbedding(ArchR_EHB, colorBy = "GeneScoreMatrix", name = "ZEB2", embedding = "UMAP", pal = c("grey","#c2b1e3","#3232f5"))
-plotPDF(p, name = "Script5/UMAP_geneScore_ZEB2.pdf", ArchRProj = ArchR_EHB, addDOC = FALSE, width = 5, height = 5)
-rm(p)
-```
-
-```{r}
-# extract ZEB2 geneScore for each single cell
-load("./data_rda/Script1/GeneScoreMatrix.rda")
-ZEB2_score <- as.matrix(assay(GeneScoreMatrix["ZEB2",]))
-sum(colnames(ZEB2_score) == ArchR_EHB$cellNames) == length(ArchR_EHB$cellNames)
-rm(GeneScoreMatrix)
-gc()
-```
-
-```{r}
-# calculate average gene score for each age, split by region and ct
-summary_human_ATAC <- data.frame()
-for (x in unique(ArchR_EHB$Region)){
-  for (y in unique(ArchR_EHB$Age)){
-    for (z in c("Neuron", "Neuronal IPC", "Radial glia")){
-      if (sum(ArchR_EHB$Region==x & ArchR_EHB$Age==y & ArchR_EHB$ctAnnot_2.0==z) >=20){ # remove rare cell types - nCell < 20
-        avg <- mean(ZEB2_score[ArchR_EHB$Region==x & ArchR_EHB$Age==y & ArchR_EHB$ctAnnot_2.0==z])
-        summary_human_ATAC <- rbind(summary_human_ATAC, c(x, y, z, avg))
-      }
-    }
-  }
-  rm(x,y,z,avg)
-}
-names(summary_human_ATAC) <- c("region","age","celltype","avgGeneScore")
-summary_human_ATAC$avgGeneScore <- as.numeric(summary_human_ATAC$avgGeneScore)
-
-# trend plot
-ggplot(summary_human_ATAC, aes(x = age, y = avgGeneScore, group = celltype, color = celltype)) + facet_wrap(~region, ncol=3) +
-  geom_line(size=1) + theme_bw() + ggtitle("Human ZEB2 Gene Score") + 
-  xlab("") + BuenColors::pretty_plot() +
-  scale_color_manual(values = c(Neuron="#3ee2ff", "Radial glia"="#836dff", "Neuronal IPC"="#40a1ff"))
-```
-
-
-### RG cells (21K)
-```{r}
-load("./data_rda/Script5/seurat_RG_raw.rda")
-
-ctMarkers <- c("HOPX","CRYAB","ZEB2","SOX2","PAX6","LMNB1","LMNB2","HES1","NFIX","TNC","VIM","PROM1")
-genescore <- cbind(seurat_RG$Age, seurat_RG$Region, seurat_RG$ctAnnot_RG, as.data.frame(t(seurat_RG[["ATAC"]]$counts[ctMarkers, ])))
-names(genescore)[1:3] <- c("Age","Region","Subtype")
-genescore_avg <- genescore %>% group_by(Age, Region, Subtype) %>% summarise(across(where(is.numeric), mean))
-genescore_avg$Region <- factor(genescore_avg$Region, levels = c("Forebrain","CerebellumPons","Medulla"))
-```
-
-```{r}
-ggplot(genescore_avg, aes(x = Age, y = ZEB2, group = Subtype, colour = Subtype)) +
-  geom_point() + geom_line() + 
-  facet_wrap(~Region, ncol=3) +
-  BuenColors::pretty_plot() +
-  scale_color_manual(values = c(tNE="#463C91",vRG="#5E4CE6",oRG="#9E8FFF",tRG="#BFB6FA")) +
-  xlab("")
-```
-
-```{r}
-ggplot(genescore_avg, aes(x = Age, y = HOPX, group = Subtype, colour = Subtype)) +
-  geom_point() + geom_line() + 
-  facet_wrap(~Region, ncol=3) +
-  BuenColors::pretty_plot() 
-```
-
-
-## (2) Eze 2021 (RNA)
-Raw data: https://cells-test.gi.ucsc.edu/?ds=early-brain&cell=CS13_TGTGGTAAGATATACG
-```{r}
-load("./data_input/ZEB2_pattern/Seurat_Eze.rda")
-
-# get coordinates from the paper
-UMAP_coordinates_Eze <- read.table("./data_input/ZEB2_pattern/Eze_UMAP_coords.tsv")
-sum(UMAP_coordinates_Eze$V1 == sub("Eze__", "", names(Seurat_Eze$orig.ident))) == nrow(UMAP_coordinates_Eze) # same cell order!
-names(UMAP_coordinates_Eze)[2:3] <- c("x","y")
-```
-
-```{r
-# UMAP colour by ages
-p <- DimPlot(Seurat_Eze, label = FALSE, group.by = c("Age"))
-p[[1]][["data"]][["umap_1"]] <- UMAP_coordinates_Eze$x
-p[[1]][["data"]][["umap_2"]] <- UMAP_coordinates_Eze$y
-suppressMessages(p + ylim(-13, 15) + ggtitle("Human scRNA-seq") + labs(color = "Age") + coord_fixed(ratio = 1))
-
-rm(p)
-```
-
-```{r
-# UMAP colour by cell type
-p <- DimPlot(Seurat_Eze, label = FALSE, group.by = c("Cell.Type"))
-p[[1]][["data"]][["umap_1"]] <- UMAP_coordinates_Eze$x
-p[[1]][["data"]][["umap_2"]] <- UMAP_coordinates_Eze$y
-suppressMessages(p + ylim(-13, 15) + ggtitle("Human scRNA-seq") + labs(color = "Cell type") + coord_fixed(ratio = 1))
-
-rm(p)
-```
-
-
-```{r}
-# ZEB2 UMAP
-p <- FeaturePlot(Seurat_Eze, features = "ZEB2")
-p[[1]][["data"]][["umap_1"]] <- UMAP_coordinates_Eze$x
-p[[1]][["data"]][["umap_2"]] <- UMAP_coordinates_Eze$y
-suppressMessages(p + ylim(-12, 15) + labs(color = "Expression") + coord_fixed(ratio = 1))
-
-# get expression data
-ZEB2_expression_Eze <- p[[1]][["data"]][["ZEB2"]]
-rm(p)
-```
-
-```{r}
-# only looking at 'useful' cell types
-useful <- c("IPC","Neuroepithelial","Neuronal","Radial Glial")
-
-# calculate average expression
-summary_human_RNA <- data.frame()
-for (x in unique(Seurat_Eze$Age)){
-  for (y in useful){
-    summary_human_RNA <- rbind(summary_human_RNA, c(x,"All Cell Types",mean(ZEB2_expression_Eze[Seurat_Eze$Age==x])))
-    summary_human_RNA <- rbind(summary_human_RNA, c(x,"All Neuronal",mean(ZEB2_expression_Eze[Seurat_Eze$Age==x & Seurat_Eze$Cell.Type %in% useful])))
-    summary_human_RNA <- rbind(summary_human_RNA, c(x,y,mean(ZEB2_expression_Eze[Seurat_Eze$Age==x & Seurat_Eze$Cell.Type==y])))
-  }
-  rm(x,y)
-}
-names(summary_human_RNA) <- c("Age", "Celltype", "Expression")
-summary_human_RNA$Expression <- as.numeric(summary_human_RNA$Expression)
-
-# combine RG subtypes
-for (x in unique(Seurat_Eze$Age)){
-  summary_human_RNA <- rbind(summary_human_RNA, c(x,"All radial glia", mean(ZEB2_expression_Eze[Seurat_Eze$Age==x & Seurat_Eze$Cell.Type %in% c("Neuroepithelial","Radial Glial")])))
-  rm(x)
-}
-summary_human_RNA$Expression <- as.numeric(summary_human_RNA$Expression)
-```
-
-```{r}
-# trend plot: all vs neuronal
-fil <- summary_human_RNA[summary_human_RNA$Celltype %in% c("Radial Glial","Neuroepithelial","All Neuronal"),]
-ggplot(fil, aes(x = Age, y = Expression, group = Celltype, color = Celltype)) +
-  geom_line(size=1) + theme_bw() + ggtitle("Human ZEB2 Expression") + xlab("") + BuenColors::pretty_plot()  +
-  scale_color_manual(values = c("All Neuronal"="#40a1ff", "Radial Glial"="#836dff", "Neuroepithelial"="#c47df0"))
-rm(fil)
-```
-
-```{r
-# trend plot: neuronal split
-ggplot(summary_human_RNA[!summary_human_RNA$Celltype %in% c("all cell type","all neuronal"),], aes(x = Age, y = Expression, group = Celltype, color = Celltype)) +
-  geom_line() + theme_bw() + ggtitle("ZEB2 Expression Level")
-```
-
-```{r}
-rm(useful, Seurat_Eze)
-gc()
-```
-
-
-
-## (3) Di Bella 2021 (RNA)
-Raw data: https://singlecell.broadinstitute.org/single_cell/study/SCP1290/molecular-logic-of-cellular-diversification-in-the-mammalian-cerebral-cortex#study-download
-
-```{r}
-load("./data_input/ZEB2_pattern/Seurat_DiBella.rda")
-
-# UMAP coordinates
-UMAP_coordinates_DiBella <- read.table("./data_input/ZEB2_pattern/DiBella_UMAP_coords.txt", header = TRUE)
-UMAP_coordinates_DiBella <- UMAP_coordinates_DiBella[2:nrow(UMAP_coordinates_DiBella),]
-UMAP_coordinates_DiBella$X <- as.numeric(UMAP_coordinates_DiBella$X)
-UMAP_coordinates_DiBella$Y <- as.numeric(UMAP_coordinates_DiBella$Y)
-```
-
-```{r
-# UMAP - colour by age
-p <- DimPlot(Seurat_DiBella, label = FALSE, group.by = c("biosample_id"))
-p[[1]][["data"]][["umap_1"]] <- UMAP_coordinates_DiBella$X
-p[[1]][["data"]][["umap_2"]] <- UMAP_coordinates_DiBella$Y
-p + ggtitle("Mouse scRNA-seq") + labs(color = "Age") + coord_fixed(ratio = 1)
-
-rm(p)
-```
-
-```{r
-# UMAP - colour by cell type
-p <- DimPlot(Seurat_DiBella, label = FALSE, group.by = c("New_cellType"))
-p[[1]][["data"]][["umap_1"]] <- UMAP_coordinates_DiBella$X
-p[[1]][["data"]][["umap_2"]] <- UMAP_coordinates_DiBella$Y
-p + ggtitle("Mouse scRNA-seq") + labs(color = "Cell type") + coord_fixed(ratio = 1)
-
-rm(p)
-```
-
-```{r}
-# ZEB2 UMAP
-p <- FeaturePlot(Seurat_DiBella, features = "Zeb2")
-p[[1]][["data"]][["umap_1"]] <- UMAP_coordinates_DiBella$X
-p[[1]][["data"]][["umap_2"]] <- UMAP_coordinates_DiBella$Y
-suppressMessages(p + ylim(-18,14) + xlim(-16,14) + ggtitle("Zeb2") + labs(color = "Expression") + coord_fixed(ratio = 1))
-
-# get expression data
-ZEB2_expression_DiBella <- p[[1]][["data"]][["Zeb2"]]
-rm(p)
-```
-
-```{r}
-# only looking at 'useful' cell types
-table(Seurat_DiBella$New_cellType[Seurat_DiBella$biosample_id %in% c("E10","E11","E12","E13","E14","E15","E16")])
-useful <- c("Apical progenitors","Intermediate progenitors","Immature neurons","Migrating neurons","Interneurons","CThPN","SCPN", "UL CPN")
-useful_broad <- c("Apical RG", "Intermediate RG", rep("neurons",6))
-Seurat_DiBella$Broad_cellType <- stri_replace_all_regex(Seurat_DiBella$New_cellType, pattern = useful, replacement = useful_broad, vectorise_all = FALSE)
-
-# calculate average expression
-ZEB2_summary <- data.frame()
-for (x in c("E10","E11","E12","E13","E14","E15","E16")){
-  for (y in unique(useful_broad)){
-    ZEB2_summary <- rbind(ZEB2_summary, c(x,"All Cell Type", mean(ZEB2_expression_DiBella[Seurat_DiBella$biosample_id==x])))
-    ZEB2_summary <- rbind(ZEB2_summary, c(x,"All Neuronal",mean(ZEB2_expression_DiBella[Seurat_DiBella$biosample_id==x & Seurat_DiBella$Broad_cellType %in% useful_broad])))
-    ZEB2_summary <- rbind(ZEB2_summary, c(x,y,mean(ZEB2_expression_DiBella[Seurat_DiBella$biosample_id==x & Seurat_DiBella$Broad_cellType==y])))
-  }
-  rm(x,y)
-}
-names(ZEB2_summary) <- c("Age", "Celltype", "Expression")
-ZEB2_summary$Expression <- as.numeric(ZEB2_summary$Expression)
-ZEB2_summary$Expression[is.na(ZEB2_summary$Expression)] <- 0
-
-# combining RG subtypes
-summary_mouse_RNA <- ZEB2_summary
-for (x in c("E10","E11","E12","E13","E14","E15","E16")){
-  summary_mouse_RNA <- rbind(summary_mouse_RNA, c(x,"All radial glia", mean(ZEB2_expression_DiBella[Seurat_DiBella$biosample_id==x & Seurat_DiBella$Broad_cellType %in% c("Apical RG","Intermediate RG")])))
-  rm(x)
-}
-summary_mouse_RNA$Expression <- as.numeric(summary_mouse_RNA$Expression)
-```
-
-```{r
-# trend plot: all vs neuronal
-ggplot(ZEB2_summary[ZEB2_summary$Celltype %in% c("all cell type","all neuronal"),], aes(x = Age, y = Expression, group = Celltype, color = Celltype)) +
-  geom_line() + theme_bw() + ggtitle("ZEB2 Expression Level")
-```
-
-```{r}
-# trend plot: neuronal split
-fil <- ZEB2_summary[!ZEB2_summary$Celltype %in% c("All Cell Type","neurons"),]
-ggplot(fil, aes(x = Age, y = Expression, group = Celltype, color = Celltype)) +
-  geom_line(size=1) + theme_bw() + ggtitle("Mouse Zeb2 Expression") + xlab("") + BuenColors::pretty_plot()  +
-  scale_color_manual(values = c("All Neuronal"="#40a1ff", "Apical RG"="#c47df0", "Intermediate RG"="#836dff"))
-rm(fil)
-```
-
-```{r}
-rm(Seurat_DiBella)
-gc()
-```
-
-
-## (4) Sarropoulos 2021 (ATAC)
-Raw data: https://apps.kaessmannlab.org/mouse_cereb_atac/#step_four
-
-```{r}
-load("./data_input/ZEB2_pattern/Seurat_Sarropoulos_coord.rda")
-```
-
-```{r
-# UMAP: coloured by age
-DimPlot(Seurat_Sarropoulos, label = FALSE, group.by = c("Dev_stage")) + 
-  ggtitle("Mouse scATAC-seq") + labs(color = "Age") + coord_fixed(ratio = 0.75)
-```
-
-```{r
-# UMAP: coloured by cell type
-DimPlot(Seurat_Sarropoulos, label = FALSE, group.by = c("Cell_type_broad")) + 
-  ggtitle("Mouse scATAC-seq") + labs(color = "Cell type") + coord_fixed(ratio = 0.75)
-```
-
-```{r}
-# ZEB2 UMAP
-p <- FeaturePlot(Seurat_Sarropoulos, features = "Zeb2", slot = "counts")
-
-# log-transform the gene scores (same as ArchR)
-p[[1]][["data"]][["Zeb2"]] <- log2(p[[1]][["data"]][["Zeb2"]]+1) 
-
-p <- p  + ggtitle("Zeb2") + labs(color = "Log2(NormCounts + 1)") + coord_fixed(ratio = 0.75)
-suppressMessages(p + scale_colour_gradientn(colors = c("lightgrey", "blue"), limits = c(0, max(p[[1]][["data"]][["Zeb2"]]))))
-
-# get expression data
-ZEB2_geneScore_Sarropoulos <- p[[1]][["data"]][["Zeb2"]]
-rm(p)
-```
-
-```{r}
-# only looking at 'useful' cell types
-## GC = granule cell, a type of neuron
-## Isthmic_nuclei = neurons in the Isthmic nuclei
-## NTZ = neurons in the nuclear transitory zone
-## Parabrachial = cells in the Parabrachial nuclei
-## PC = Purkinje cells
-## Astroglia: contains 4784 uncommitted progenitors (RG!)
-table(Seurat_Sarropoulos$Cell_type_broad[Seurat_Sarropoulos$Dev_stage %in% c("e10","e11","e12","e13","e15")])
-table(Seurat_Sarropoulos$Cell_type_description[Seurat_Sarropoulos$Cell_type_broad=="Astroglia"])
-Seurat_Sarropoulos$Cell_type_broad[Seurat_Sarropoulos$Cell_type_description=="Uncommitted progenitors"] <- "Radial Glia"
-
-useful <- c("Astroglia","GABA_DN","GC","Glut_DN","Interneuron","Isthmic_nuclei","NTZ","Parabrachial","Radial Glia")
-useful_broad <- c("Astroglia", rep("Neurons",7),"Radial Glia")
-Seurat_Sarropoulos$Broad_cellType <- stri_replace_all_regex(Seurat_Sarropoulos$Cell_type_broad, pattern = useful, replacement = useful_broad, vectorise_all = FALSE)
-
-# calculate average expression
-summary_mouse_ATAC <- data.frame()
-for (x in c("e10","e11","e12","e13","e15")){
-  for (y in unique(useful_broad)){
-    summary_mouse_ATAC <- rbind(summary_mouse_ATAC, c(x,"All Cell Type", mean(ZEB2_geneScore_Sarropoulos[Seurat_Sarropoulos$Dev_stage==x])))
-    summary_mouse_ATAC <- rbind(summary_mouse_ATAC, c(x,"All Neuronal",mean(ZEB2_geneScore_Sarropoulos[Seurat_Sarropoulos$Dev_stage==x & Seurat_Sarropoulos$Broad_cellType %in% useful_broad])))
-    summary_mouse_ATAC <- rbind(summary_mouse_ATAC, c(x,y,mean(ZEB2_geneScore_Sarropoulos[Seurat_Sarropoulos$Dev_stage==x & Seurat_Sarropoulos$Broad_cellType==y])))
-  }
-  rm(x,y)
-}
-names(summary_mouse_ATAC) <- c("Age", "Celltype", "geneScore")
-summary_mouse_ATAC$geneScore <- as.numeric(summary_mouse_ATAC$geneScore)
-```
-
-```{r}
-# trend plot: all vs neuronal
-ggplot(summary_mouse_ATAC[summary_mouse_ATAC$Celltype %in% c("All Neuronal","Neurons","Radial Glia"),], 
-       aes(x = Age, y = geneScore, group = Celltype, color = Celltype)) +
-  geom_line(size=1) + theme_bw() + ggtitle("Mouse Zeb2 Gene Score") + xlab("") + BuenColors::pretty_plot()  +
-  scale_color_manual(values = c("Neurons"="#3ee2ff", "Radial Glia"="#836dff","All Neuronal"="#40a1ff"))
-```
-
-```{r}
-# trend plot: neuronal split
-ggplot(summary_mouse_ATAC[!summary_mouse_ATAC$Celltype %in% c("all cell type","all neuronal"),], aes(x = Age, y = geneScore, group = Celltype, color = Celltype)) +
-  geom_line() + theme_bw() + ggtitle("ZEB2 Gene Score Level")
-```
-
-```{r}
-rm(useful, useful_broad, Seurat_Sarropoulos)
-rm(ZEB2_expression_DiBella, ZEB2_geneScore_ours, ZEB2_geneScore_Sarropoulos, ZEB2_expression_Eze)
-gc()
-```
-
-
-## (5) RG comparison
-```{r}
-# ATAC
-RG_comparison <- list()
-RG_comparison$"Human ATAC" <- cbind(summary_human_ATAC[summary_human_ATAC$region=="CerebellumPons" & summary_human_ATAC$celltype=="Radial glia", c("age","avgGeneScore")], "dataset"="human cerebellum/pons", "data"="ATAC")
-RG_comparison$"Mouse ATAC" <- cbind(summary_mouse_ATAC[summary_mouse_ATAC$Celltype=="Radial Glia", c("Age","geneScore")], "dataset"="mouse cerebellum", "data"="ATAC")
-
-# RNA
-RG_comparison$"Human RNA" <- cbind(summary_human_RNA[summary_human_RNA$Celltype=="All radial glia", c("Age","Expression")], "dataset"="human telencephalon", "data"="RNA") # telencephalon, combines RG and neuroepithelial
-RG_comparison$"Mouse RNA" <- cbind(summary_mouse_RNA[summary_mouse_RNA$Celltype=="All radial glia", c("Age","Expression")], "dataset"="mouse prospective somatosensory cortex", "data"="RNA") # prospective somatosensory cortex, "All radial glia" combines apical RG (NE-like) and intermediate RG
-
-# combined
-names(RG_comparison[[1]])[1:2] <- c("CS","geneScore")
-names(RG_comparison[[2]])[1:2] <- c("E","geneScore")
-names(RG_comparison[[3]])[1:2] <- c("CS","expression")
-names(RG_comparison[[4]])[1:2] <- c("E","expression")
-
-# numeric age
-RG_comparison[[1]]$CS <- as.numeric(sub("CS","",RG_comparison[[1]]$CS))
-RG_comparison[[2]]$E <- as.numeric(sub("e","",RG_comparison[[2]]$E))
-RG_comparison[[3]]$CS <- as.numeric(sub("CS","",RG_comparison[[3]]$CS))
-RG_comparison[[4]]$E <- as.numeric(sub("E","",RG_comparison[[4]]$E))
-```
-
-```{r}
-# human ATAC
-p1 <- ggplot(RG_comparison[["Human ATAC"]], aes(x=CS, y=geneScore)) +
-      geom_rect(aes(xmin = 16, xmax = 21, ymin = -Inf, ymax = Inf), fill = "pink", alpha = 0.1) +
-      geom_vline(xintercept = 16, linetype = "dashed", colour = "pink", size = 0.8) +
-      geom_vline(xintercept = 21, linetype = "dashed", colour = "pink", size = 0.8) +
-      geom_line(colour="red",size=1) + 
-      BuenColors::pretty_plot() +
-      ggtitle("Human ATAC") + ylab("ZEB2 gene score") + xlab("Age (CS)") +
-      theme(plot.title = element_text(size =11))
-
-# mouse ATAC
-p2 <- ggplot(RG_comparison[["Mouse ATAC"]], aes(x=E, y=geneScore)) +
-      geom_rect(aes(xmin = 10, xmax = 13, ymin = -Inf, ymax = Inf), fill = "pink", alpha = 0.1) +
-      geom_vline(xintercept = 10, linetype = "dashed", colour = "pink", size = 0.8) +
-      geom_vline(xintercept = 13, linetype = "dashed", colour = "pink", size = 0.8) +
-      geom_line(colour="red",size=1) + 
-      BuenColors::pretty_plot() +
-      ggtitle("Mouse ATAC") + ylab("Zeb2 gene score") + xlab("Age (E)") + 
-      theme(plot.title = element_text(size =11))
-
-# human RNA
-p3 <- ggplot(RG_comparison[["Human RNA"]], aes(x=CS, y=expression)) +
-      geom_rect(aes(xmin = 16, xmax = 22, ymin = -Inf, ymax = Inf), fill = "lightyellow", alpha = 0.8) +
-      geom_vline(xintercept = 16, linetype = "dashed", colour = "yellow", size = 0.8) +
-      geom_vline(xintercept = 22, linetype = "dashed", colour = "yellow", size = 0.8) +
-      geom_line(colour="orange",size=1) + 
-    scale_x_continuous(breaks = c(12, 14, 16, 18, 20, 22)) +
-      BuenColors::pretty_plot() +
-      ggtitle("Human RNA") + ylab("ZEB2 expression") + xlab("Age (CS)") +
-      theme(plot.title = element_text(size =11))
-
-# mouse RNA
-p4 <- ggplot(RG_comparison[["Mouse RNA"]], aes(x=E, y=expression)) +
-      geom_rect(aes(xmin = 10, xmax = 13.5, ymin = -Inf, ymax = Inf), fill = "lightyellow", alpha = 0.8) +
-      geom_vline(xintercept = 10, linetype = "dashed", colour = "yellow", size = 0.8) +
-      geom_vline(xintercept = 13.5, linetype = "dashed", colour = "yellow", size = 0.8) +
-      geom_line(colour="orange",size=1) + 
-      BuenColors::pretty_plot() +
-      ggtitle("Mouse RNA") + ylab("Zeb2 expression") + xlab("Age (E)") +
-      theme(plot.title = element_text(size =11))
-
-# combined
-wrap_plots(p1,p2,p3,p4, ncol=2)
+```{r, fig.width=11, fig.height=2.75, dpi=300}
+# plot
+wrap_plots(append(p,append(p0,p1)), ncol=3) + plot_layout(guides = "collect", heights=c(5,1,1))
 ```
 

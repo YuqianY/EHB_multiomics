@@ -1,6 +1,6 @@
 Neuronal/Glial lineage development
 
-```{r}
+```{r, message=FALSE}
 library(ArchR)
 addArchRGenome("hg38")
 
@@ -10,13 +10,13 @@ library(patchwork)
 library(tidyr)
 library(tidyverse)
 library(stringi)
+library(Seurat)
+library(ggrepel)
 ```
 
 
 
 # 1. Trajectory analysis
-Skipped batch correction for age, because age is a biological variable of interest (developmental time course)
-Skipped batch correction for region, because each region will be analysed separately
 ```{r}
 load("./data_rda/Script3/ArchR_EHB_5ct.rda")
 ```
@@ -54,14 +54,17 @@ for (x in unique(ArchR_EHB_5ct$Region)){
 }
 ```
 
+### main fig - trajectory UMAP
 ```{r}
-# compute trajectory, split early/late stages ~ 3s
+set.seed(100)
+
+# compute trajectory, split early/late stages
 p <- list()
 i <- 1
 for (x in names(ArchR_lineage_neuro)){
   ArchR_lineage_neuro[[x]]$Stage <- stri_replace_all_regex(ArchR_lineage_neuro[[x]]$Age, vectorise_all = FALSE,
-                                                           pattern = c("CS14","CS16","CS17","CS20","CS21"),
-                                                           replacement = paste0(x, "_", c("Early","Early","Late","Late","Late")))
+                                          pattern = c("CS14","CS16","CS17","CS20","CS21"),
+                                          replacement = paste0(x, "_", c("Early","Early","Late","Late","Late")))
   for (y in unique(ArchR_lineage_neuro[[x]]$Stage)){
     # keep only cells in the given stage
     ArchR_lineage_neuro[[x]]$Traj_label <- NA
@@ -72,7 +75,7 @@ for (x in names(ArchR_lineage_neuro)){
     ArchR_lineage_neuro[[x]] <- addTrajectory(ArchRProj = ArchR_lineage_neuro[[x]], name = y,
                                               groupBy = "Traj_label", reducedDims = "Harmony_age",
                                  trajectory = c("Radial glia","Neuronal IPC","Neuroblast","Neuron"), embedding = "UMAP_neuro",
-                                 preFilterQuantile = 0.98, postFilterQuantile = 0.98, force = TRUE, spar = 1.1)
+                                 preFilterQuantile = 0.98, postFilterQuantile = 0.98, force = TRUE, spar = 1.5)
     p[[i]] <- plotTrajectory(ArchR_lineage_neuro[[x]], embedding = "UMAP_neuro", trajectory = y, colorBy = "cellColData", name = y,
                              plotAs = "points", continuousSet = "solarExtra")
     i <- i+1
@@ -80,7 +83,7 @@ for (x in names(ArchR_lineage_neuro)){
 }
 rm(i, x, y)
 
-# saving PDF ~ 6s
+# saving PDF
 pdf("./ArchR_lineage/Neuronal/Plots/neuro_trajectory_all.pdf", width = 3, height = 3.6)
 p[[1]][[1]]
 p[[2]][[1]]
@@ -91,45 +94,57 @@ p[[6]][[1]]
 dev.off()
 ```
 
+### main fig - pseudotime bins
 ```{r}
-# pseudo-time heatmap for gene score ~ 1.5 min
-colours <- c("Neuron"="#3ee2ff", "Neuroblast"="#00cfff", "Neuronal IPC" = "#40a1ff", "Radial glia"="#836dff")
-p1 <- list()
+# sanity check: cell type labels along pseudotime
+subtype <- list()
 for (x in names(ArchR_lineage_neuro)){
   for (y in paste0(x, "_", c("Early","Late"))){
-    print(y)
-    trajGSM <- getTrajectory(ArchR_lineage_neuro[[x]], name = y, useMatrix = "GeneScoreMatrix", log2Norm = FALSE, 
-                             trajectoryLabel = "ctAnnot_2.0")
-    p1[[y]] <- plotTrajectoryHeatmap(trajGSM, pal = c("#3d1c69", "#704D9E", "#BC5AA9", "#ED7C97", "#f79452", "#f2de5c"), labelTop = 20,
-                                    colorColumns = TRUE, columnPal = colours[unique(trajGSM@colData@listData[["label"]])])
+    # pseudotime bins
+    pseudotime <- data.frame(cellID = getCellNames(ArchR_lineage_neuro[[x]]), 
+                             pseudotime = ArchR_lineage_neuro[[x]]@cellColData@listData[[y]],
+                             celltype = ArchR_lineage_neuro[[x]]$ctAnnot_2.0)
+    pseudotime <- na.omit(pseudotime)
+    pseudotime$bin <- pmin(floor(pseudotime$pseudotime) + 1, 100)
+      
+    # avg cell type for each pseudotime bin 
+    subtype[[y]] <- data.frame()
+    for(z in 1:100){
+      subtype[[y]] <- rbind(subtype[[y]], c(z, names(which.max(table(pseudotime$celltype[pseudotime$bin==z])))))
+    }
+    names(subtype[[y]]) <- c("bin","celltype")
+    subtype[[y]]$bin <- as.numeric(subtype[[y]]$bin)
   }
+  rm(x, y, z, pseudotime)
 }
-rm(x, y, trajGSM)
+names(subtype) <- stri_replace_all_regex(names(subtype), pattern = c("Forebrain","Medulla","CerebellumPons"), 
+                                         replacement = c("FB","MD","CP"), vectorize_all = FALSE)
+
+# plot cell types
+p <- list()
+for (x in names(subtype)){
+  p[[x]] <- ggplot() + annotate("text", x=0, y=0, label = sub("_"," ",x), size = 3.5) + theme_void() +
+    ggplot(subtype[[x]], aes(x=bin, y=0, fill=celltype)) + geom_tile() + 
+    theme_void() + scale_fill_manual(values = c(Neuron="#3ee2ff", Neuroblast="#00cfff", "Neuronal IPC" = "#40a1ff", 
+                                                'Radial glia'="#836dff", Glioblast="#c47df0"), name = "Cell type") +
+    #coord_fixed(ratio = 10) + 
+    plot_layout(widths = c(1.08,4)) 
+}
+for (x in 1:5){
+  p[[x]] <- p[[x]] + theme(legend.position = "none")
+}
+
+# add pseudotime scale
+p[[7]] <- ggplot() + annotate("text", x=0, y=0, label=" ", size = 3.5) + theme_void() +
+  ggplot() + annotate("text", x=0, y=0, label="") + theme_classic() +
+  theme(axis.line.x = element_line(),  axis.line.y = element_blank(),
+        axis.ticks.y = element_blank(), axis.text.y = element_blank(), axis.title.y = element_blank()) +
+  xlab("pseudotime") + xlim(0,100) +
+  plot_layout(widths = c(1,4))
 ```
 
-```{r}
-# saving PDF
-names(p1)
-pdf("./ArchR_lineage/Neuronal/Plots/neuro_genescore_heatmap1.pdf", width = 7.2, height = 5.6)
-p1
-dev.off()
-```
-
-```{r plot for presentation: how to construct "Forebrain late" trajectory}
-library(ArchR)
-load("./data_rda/Script7/ArchR_lineage_neuro.rda")
-trial <- ArchR_lineage_neuro[["Forebrain"]]
-
-# hide early cells
-trial$new <- trial$ctAnnot_2.0
-trial$new[trial$Age %in% c("CS14","CS16")] <- "early"
-
-plotPDF(plotEmbedding(trial, colorBy = "cellColData", name = "new", 
-                        embedding = "UMAP_neuro",  labelMeans=FALSE,
-                        pal = c(Neuron="#3ee2ff", Neuroblast="#00cfff", "Neuronal IPC" = "#40a1ff", 
-                                'Radial glia'="#836dff", Glioblast="#c47df0", "early"="grey80")), 
-          name = paste0("presentation.pdf"), 
-          ArchRProj = trial, addDOC = FALSE, width = 6, height = 6)
+```{r, fig.width=5, fig.height=2, dpi=300}
+wrap_plots(p, ncol=1) + plot_layout(guides = "collect", heights = c(1,1,1,1,1,1,0))
 ```
 
 
@@ -141,7 +156,7 @@ addArchRThreads(8)
 
 # prepare UMAP ~ 30s
 ArchR_lineage_glial <- list()
-for (x in unique(ArchR_EHB_5ct$Region)){
+for (x in c("CerebellumPons", "Medulla")){
   print(x)
   ArchR_lineage_glial[[x]] <- ArchR_EHB_5ct[ArchR_EHB_5ct$Region == x & ArchR_EHB_5ct$ctAnnot_2.0 %in% 
                                               c("Glioblast", "Radial glia"),]
@@ -166,15 +181,18 @@ for (x in unique(ArchR_EHB_5ct$Region)){
 }
 ```
 
+### supp fig - trajectory UMAP
 ```{r}
-# compute trajectory, split early/late stages ~ 2s
+set.seed(100)
+
+# compute trajectory for hindbrain late stages only
 p <- list()
 i <- 1
-for (x in c("CerebellumPons","Medulla")){
+for (x in names(ArchR_lineage_glial)){
   ArchR_lineage_glial[[x]]$Stage <- stri_replace_all_regex(ArchR_lineage_glial[[x]]$Age, vectorise_all = FALSE,
                                                            pattern = c("CS14","CS16","CS17","CS20","CS21"),
                                                            replacement = paste0(x, "_", c("Early","Early","Late","Late","Late")))
-  for (y in unique(ArchR_lineage_glial[[x]]$Stage)){
+  for (y in paste0(x,"_Late")){
     # keep only cells in the given stage
     ArchR_lineage_glial[[x]]$Traj_label <- NA
     ArchR_lineage_glial[[x]]$Traj_label[ArchR_lineage_glial[[x]]$Stage==y] <-
@@ -184,7 +202,7 @@ for (x in c("CerebellumPons","Medulla")){
     ArchR_lineage_glial[[x]] <- addTrajectory(ArchRProj = ArchR_lineage_glial[[x]], name = y,
                                               groupBy = "Traj_label", reducedDims = "Harmony_age",
                                  trajectory = c("Radial glia","Glioblast"), embedding = "UMAP_glial",
-                                 preFilterQuantile = 0.98, postFilterQuantile = 0.98, force = TRUE, spar = 1.1)
+                                 preFilterQuantile = 0.98, postFilterQuantile = 0.98, force = TRUE, spar = 1.5)
     p[[i]] <- plotTrajectory(ArchR_lineage_glial[[x]], embedding = "UMAP_glial", trajectory = y, colorBy = "cellColData", name = y,
                              plotAs = "points", continuousSet = "solarExtra")
     i <- i+1
@@ -192,21 +210,19 @@ for (x in c("CerebellumPons","Medulla")){
 }
 rm(i, x, y)
 
-# saving PDF ~ 4s
+# saving PDF
 pdf("./ArchR_lineage/Glial/Plots/glial_trajectory_all.pdf", width = 3, height = 3.6)
 p[[1]][[1]]
 p[[2]][[1]]
-p[[3]][[1]]
-p[[4]][[1]]
 dev.off()
 ```
 
 ```{r}
-# pseudo-time heatmap for gene score ~ 1 min
+# sanity check: pseudo-time heatmap for gene score ~ 1 min
 colours <- c("Radial glia"="#836dff", "Glioblast"="#c47df0")
 p <- list()
 for (x in c("CerebellumPons","Medulla")){
-  for (y in paste0(x, "_", c("Early","Late"))){
+  for (y in paste0(x, "_", c("Late"))){
     print(y)
     trajGSM <- getTrajectory(ArchR_lineage_glial[[x]], name = y, useMatrix = "GeneScoreMatrix", log2Norm = FALSE,
                              trajectoryLabel = "ctAnnot_2.0")  
@@ -215,137 +231,29 @@ for (x in c("CerebellumPons","Medulla")){
   }
 }
 rm(x, y, trajGSM)
-```
 
-```{r}
 # saving PDF
 names(p)
-pdf("./ArchR_lineage/Glial/Plots/glial_genescore_heatmap1.pdf", width = 7.2, height = 5.6)
+pdf("./ArchR_lineage/Glial/Plots/glial_genescore_heatmap.pdf", width = 7.2, height = 5.6)
 p
 dev.off()
 ```
 
 
-## (3) save ArchR
+## -------- save ArchR --------
 ```{r}
 save(ArchR_lineage_neuro, file = "./data_rda/Script7/ArchR_lineage_neuro.rda")
 save(ArchR_lineage_glial, file = "./data_rda/Script7/ArchR_lineage_glial.rda")
 ```
 
 
-
-# 2. Validation
-## (1) pseudotime ~ age
-```{r
-# Neuronal lineage
-summary <- data.frame()
-for (x in names(ArchR_lineage_neuro)){
-  for (y in c("Early", "Late")){
-    name <- paste0(x, "_", y)
-    for (z in unique(ArchR_lineage_neuro[[x]]$Age[ArchR_lineage_neuro[[x]]$Stage==name])){
-      df <- data.frame("pseudotime" = na.omit(ArchR_lineage_neuro[[x]]@cellColData@listData[[name]][ArchR_lineage_neuro[[x]]$Age==z]), 
-                       "region"=x, "stage"=y, "age"=z)
-      summary <- rbind(summary, df)  
-    }
-  }
-  rm(x, y, z, name, df)
-}
-
-ggplot(summary, aes(x=age, y=pseudotime, group = age, fill = stage)) +
-  geom_violin() + facet_wrap(~region) + BuenColors::pretty_plot() + xlab("") + ggtitle("Neuronal lineage")
-rm(summary)
-```
-
-```{r
-# Glial lineage
-summary <- data.frame()
-for (x in names(ArchR_lineage_glial)){
-  for (y in c("Early", "Late")){
-    name <- paste0(x, "_", y)
-    for (z in unique(ArchR_lineage_glial[[x]]$Age[ArchR_lineage_glial[[x]]$Stage==name])){
-      df <- data.frame("pseudotime" = na.omit(ArchR_lineage_glial[[x]]@cellColData@listData[[name]][ArchR_lineage_glial[[x]]$Age==z]), 
-                       "region"=x, "stage"=y, "age"=z)
-      summary <- rbind(summary, df)  
-    }
-  }
-  rm(x, y, z, name, df)
-}
-
-ggplot(summary, aes(x=age, y=pseudotime, group = age, fill = stage)) +
-  geom_violin() + facet_wrap(~region) + BuenColors::pretty_plot() + xlab("") + ggtitle("Glial lineage")
-rm(summary)
-```
-
-
-## (2) pseudotime ~ gene score
-```{r
-# Neuronal lineage
-p <- list()
-for (x in names(ArchR_lineage_neuro)){
-  for (y in c("Early", "Late")){
-    name <- paste0(x, "_", y)
-    p[[name]] <- plotTrajectory(ArchR_lineage_neuro[[x]], embedding = "UMAP_neuro", trajectory = name, 
-                             colorBy = "GeneScoreMatrix", name = "RBFOX3", plotAs = "points")
-  }
-}
-rm( x, y, name)
-p1 <- unlist(p, recursive = FALSE)
-
-png("./ArchR_EHB/Plots/Script7/pseudotime_genescore_neuro.png", width = 4500, height = 1700, res = 200)
-wrap_plots(p1, ncol=6, byrow=FALSE, heights=c(3,1))
-dev.off()
-```
-
-```{r
-# Glial lineage
-p <- list()
-for (x in c("CerebellumPons","Medulla")){
-  for (y in c("Early", "Late")){
-    name <- paste0(x, "_", y)
-    p[[name]] <- plotTrajectory(ArchR_lineage_glial[[x]], embedding = "UMAP_glial", trajectory = name, 
-                             colorBy = "GeneScoreMatrix", name = "NFIA", plotAs = "points")
-  }
-}
-rm( x, y, name)
-p2 <- unlist(p, recursive = FALSE)
-
-png("./ArchR_EHB/Plots/Script7/pseudotime_genescore_glial.png", width = 3000, height = 1700, res = 200)
-wrap_plots(p2, ncol=4, byrow=FALSE, heights=c(3,1))
-dev.off()
-```
-
-```{r
-# selected
-select <- list("Forebrain_Early_neuronal" = p1[["Forebrain_Early2"]], 
-               "Forebrain_Late_neuronal" = p1[["Forebrain_Late2"]],
-               "CerebellumPons_Early_neuronal" = p1[["CerebellumPons_Early2"]], 
-               "CerebellumPons_Late_neuronal" = p1[["CerebellumPons_Late2"]],
-               "CerebellumPons_Early_glial" = p2[["CerebellumPons_Early2"]], 
-               "CerebellumPons_Late_glial" = p2[["CerebellumPons_Late2"]])
-for (x in names(select)){
-  select[[x]] <- select[[x]] + ggtitle(x)
-  rm(x)
-}
-
-png("./ArchR_EHB/Plots/Script7/pseudotime_genescore_select.png", width = 3500, height = 1700, res = 200)
-wrap_plots(select, ncol=3, byrow=FALSE)
-dev.off()
-```
-
-
 ## (3) cluster label & subtype
-```{r}
-load("./data_rda/Script7/ArchR_lineage_neuro.rda")
-load("./data_rda/Script7/ArchR_lineage_glial.rda")
-```
-
 ```{r}
 # cluster labels
 clusterAnnot <- readxl::read_excel("./data_output/Script1_ctAnnotation/ctAnnot_sheet5_clusterAnnot.xlsx")
 
 # add cell type annotation (C1, C2, C3, C4 must be replaced in the second round)
 for (x in names(ArchR_lineage_neuro)){
-  # neuro
   ArchR_lineage_neuro[[x]]$cluster_label <- stri_replace_all_regex(ArchR_lineage_neuro[[x]]$Clusters_2.0, 
                               pattern = clusterAnnot$cluster[!clusterAnnot$cluster %in% paste0("C",1:4)], 
                               replacement = clusterAnnot$label_clean[!clusterAnnot$cluster %in% paste0("C",1:4)],
@@ -354,8 +262,8 @@ for (x in names(ArchR_lineage_neuro)){
                               pattern = clusterAnnot$cluster, 
                               replacement = clusterAnnot$label_clean,
                               vectorize = FALSE)
-  
-  # glia
+}
+for (x in names(ArchR_lineage_glial)){
   ArchR_lineage_glial[[x]]$cluster_label <- stri_replace_all_regex(ArchR_lineage_glial[[x]]$Clusters_2.0, 
                               pattern = clusterAnnot$cluster[!clusterAnnot$cluster %in% paste0("C",1:4)], 
                               replacement = clusterAnnot$label_clean[!clusterAnnot$cluster %in% paste0("C",1:4)],
@@ -365,7 +273,6 @@ for (x in names(ArchR_lineage_neuro)){
                               replacement = clusterAnnot$label_clean,
                               vectorize = FALSE)
 }
-
 rm(x, clusterAnnot)
 ```
 
@@ -375,23 +282,21 @@ load("./data_rda/Script5/seurat_RG_raw.rda")
 annot <- data.frame(seurat_RG$ctAnnot_RG)
 annot$ID <- rownames(annot)
 names(annot)[1] <- "subtype"
-rm(seurat_RG, cluster_markers)
+rm(seurat_RG)
 gc()
 
 # replace with more accurate RG subtypes
 for (x in names(ArchR_lineage_neuro)){
-  # neuro
   overlap <- ArchR_lineage_neuro[[x]]@cellColData@rownames[ArchR_lineage_neuro[[x]]@cellColData@rownames %in% annot$ID]
   annot_fil <- annot[overlap,]
   ArchR_lineage_neuro[[x]]$cluster_label[ArchR_lineage_neuro[[x]]@cellColData@rownames %in% annot$ID] <- as.vector(annot_fil$subtype)
-  
-  # glia
+}
+for (x in names(ArchR_lineage_glial)){
   overlap <- ArchR_lineage_glial[[x]]@cellColData@rownames[ArchR_lineage_glial[[x]]@cellColData@rownames %in% annot$ID]
   annot_fil <- annot[overlap,]
   ArchR_lineage_glial[[x]]$cluster_label[ArchR_lineage_glial[[x]]@cellColData@rownames %in% annot$ID] <- as.vector(annot_fil$subtype)
-  
-  rm(x, overlap, annot_fil)
 }
+rm(x, overlap, annot_fil, annot)
 ```
 
 ```{r}
@@ -405,7 +310,7 @@ for (x in names(ArchR_lineage_neuro)){
                                   nIPC="#40a1ff","nIPC-EN"="#1C76E6","nIPC-IN"="#3CDECE"))
   rm(x)
 }
-plotPDF(p, name = paste0("neuro_UMAP_cluster_label.pdf"), ArchRProj = ArchR_lineage_neuro[[1]], addDOC = FALSE, width = 6, height = 6)
+plotPDF(p, name = "neuro_UMAP_cluster_label.pdf", ArchRProj = ArchR_lineage_neuro[[1]], addDOC = FALSE, width = 6, height = 6)
 
 # umap - glial
 p <- list()
@@ -415,11 +320,12 @@ for (x in c("CerebellumPons","Medulla")){
                           pal = c(tNE="#463C91",vRG="#5E4CE6",oRG="#9E8FFF",tRG="#BFB6FA",GB="#c47df0"))
   rm(x)
 }
-plotPDF(p, name = paste0("glial_UMAP_cluster_label.pdf"), ArchRProj = ArchR_lineage_glial[[1]], addDOC = FALSE, width = 6, height = 6)
+plotPDF(p, name = "glial_UMAP_cluster_label.pdf", ArchRProj = ArchR_lineage_glial[[1]], addDOC = FALSE, width = 6, height = 6)
 ```
 
 
-# 3. TF activity
+
+# 2. TF activity
 ## (1) ct-region-specific TF
 ```{r}
 load("./data_rda/Script7/ArchR_lineage_neuro.rda")
@@ -427,16 +333,14 @@ load("./data_rda/Script7/ArchR_lineage_glial.rda")
 load("./data_rda/Script3/heatmap_summary_ctRegion.rda")
 
 # get ct-region-specific TFs from Script3
-TF_glial <- c("NFIX","NFIA","NFIB")
-TF_neuro <- unique(heatmap_summary_ctRegion$gene)
-TF_neuro <- TF_neuro[TF_neuro %ni% TF_glial]
-TF_neuro <-as.vector(TF_neuro)
+TF_select <- unique(heatmap_summary_ctRegion$gene)
+TF_select <- as.vector(TF_select)
 ```
 
 
-## (2) glial lineage (Late only)
+## (2) supp - glial lineage
 ```{r}
-# select TFs that have correlated gene score and motif chromVAR z score, and also in the ct-region-spc list from script 3 ~ 1.5 min
+# select TFs (ct-rg-spc from script3) that have correlated gene score and motif chromVAR z score ~ 1.5 min
 heatmap <- list()
 for (x in c("CerebellumPons","Medulla")){
   for (y in paste0(x, "_Late")){
@@ -458,7 +362,7 @@ for (x in c("CerebellumPons","Medulla")){
     ## significance cutoff: FDR < 0.01, correlation >=0.5
     ## biological cutoff: top 20% variable features - VarAssay1 >= 0.8 , VarAssay2 >=0.8
     trajCor_sig <- cor[cor$FDR <= 0.01 & cor$Correlation >=0.5 & cor$VarAssay1 >= 0.8 & cor$VarAssay2 >= 0.8,]
-    trajCor_fil <- trajCor_sig[trajCor_sig$matchname1 %in% c(TF_glial, TF_neuro),]
+    trajCor_fil <- trajCor_sig[trajCor_sig$matchname1 %in% TF_select,]
     trajGeneScore <- trajGeneScore[trajCor_fil$name1, ]
     trajMotif <- trajMotif[trajCor_fil$name2, ]
     
@@ -488,7 +392,7 @@ for (x in c("CerebellumPons","Medulla")){
 
 ```{r}
 p <- heatmap[["CerebellumPons_Late"]][[2]] + heatmap[["CerebellumPons_Late"]][[1]]
-draw(p, merge_legends = TRUE, gap = unit(-2, "mm"))
+draw(p, merge_legends = TRUE, gap = unit(-2, "mm"), heatmap_legend_side = "bottom")
 ```
 
 ```{r}
@@ -498,11 +402,12 @@ draw(p, merge_legends = TRUE, gap = unit(-2, "mm"))
 
 
 
-## (3) neuronal lineage
+## (3) main & supp - neuronal lineage
 ```{r}
-# select TFs that have correlated gene score and motif chromVAR z score, and also in the ct-region-spc list from script 3 ~ 4 min
+# select TFs (ct-rg-spc from script3) that have correlated gene score and motif chromVAR z score ~ 4 min for 3 regions
 heatmap <- list()
-for (x in names(ArchR_lineage_neuro)){
+colours <- c(Neuron="#3ee2ff", Neuroblast="#00cfff", "Neuronal IPC" = "#40a1ff", 'Radial glia'="#836dff")
+for (x in "Forebrain"){  # for supp figures: names(ArchR_lineage_neuro)
   for (y in paste0(x, "_", c("Early","Late"))){
     print(y)
     
@@ -522,7 +427,7 @@ for (x in names(ArchR_lineage_neuro)){
     ## significance cutoff: FDR < 0.01, correlation >=0.4
     ## biological cutoff: top 20% variable features - VarAssay1 >= 0.8 , VarAssay2 >=0.8
     trajCor_sig <- cor[cor$FDR <= 0.01 & cor$Correlation >=0.5 & cor$VarAssay1 >= 0.8 & cor$VarAssay2 >= 0.8,]
-    trajCor_fil <- trajCor_sig[trajCor_sig$matchname1 %in% TF_neuro,]
+    trajCor_fil <- trajCor_sig[trajCor_sig$matchname1 %in% TF_select,]
     trajGeneScore <- trajGeneScore[trajCor_fil$name1, ]
     trajMotif <- trajMotif[trajCor_fil$name2, ]
     
@@ -544,390 +449,769 @@ for (x in names(ArchR_lineage_neuro)){
     heatmap[[y]][[2]] <- plotTrajectoryHeatmap(trajMotif,  pal = paletteContinuous(set = "whitePurple"),  
                                              rowOrder = rowOrder, colorColumns = TRUE, 
                                              columnPal = colours[unique(trajMotif@colData@listData[["label"]])])
+    heatmap[[y]][[1]]@ht_list[["GeneScoreMatrix"]]@top_annotation@anno_list[["label"]]@label <- ""
     heatmap[[y]][[2]]@ht_list[["MotifMatrix"]]@top_annotation@anno_list[["label"]]@label <- ""
   }
   rm(x, y, cor, trajCor_sig, trajCor_fil, trajGeneScore, trajMotif, trajCombined, combinedMat, rowOrder)
 }
 ```
 
-```{r}
+```{r, fig.width=5, fig.height=1.8, dpi=300}
 p <- heatmap[["Forebrain_Early"]][[2]] + heatmap[["Forebrain_Early"]][[1]]
-draw(p, merge_legends = TRUE, gap = unit(-2, "mm"), heatmap_legend_side = "bottom")
+draw(p, merge_legends = TRUE, gap = unit(-2, "mm"), heatmap_legend_side = "bottom", legend_gap = unit(8, "mm"))
 ```
 
-```{r}
+```{r, fig.width=5, fig.height=4, dpi=300}
 p <- heatmap[["Forebrain_Late"]][[2]] + heatmap[["Forebrain_Late"]][[1]]
 draw(p, merge_legends = TRUE, gap = unit(-2, "mm"), heatmap_legend_side = "bottom")
 ```
 
 
 
-# 4. Disease risk (Neuronal only)
-## (1) adding TRS
-```{r
+# 3. ~ SCAVENGE
+```{r}
 # SCAVENGE TRS result from section 3
-load("./data_rda/Script4/SCAVENGE_ctpeaks_5ct.rda")
-rm(mutual_knn, mutual_knn_ct)
-
-# get TRS for diseases of interest
-disease <- c("PD","BP","ASD","ADHD")
-mono_mat_ct <- mono_mat_ct[disease]
-for (x in disease){
-  mono_mat_ct[[x]] <- mono_mat_ct[[x]][,c("names","TRS")]
-  names(mono_mat_ct[[x]])[2] <- x
-  rm(x)
-}
-TRS_matrix <- Reduce(function(x, y) merge(x, y, by = "names", all = TRUE), mono_mat_ct)
-row.names(TRS_matrix) <- TRS_matrix$names
-TRS_matrix <- TRS_matrix[, -1]
-TRS_matrix <- t(as.matrix(TRS_matrix))
-rm(mono_mat_ct)
-
-# replace NA with 0
-TRS_matrix[is.na(TRS_matrix)] <- 0
-anyNA(TRS_matrix) == FALSE # no NAs
-
-# preprare ArchR
-ArchR_lineage_neuro_TRS <- ArchR_lineage_neuro[c("Forebrain","CerebellumPons")]
-```
-
-```{r
-## adding the raw TRS score without normalisation!
-
-# 1. Unlock the binding in ArchR namespace
-unlockBinding(".normalizeCols", asNamespace("ArchR"))
-
-# 2. Customise: simply return the input matrix unchanged
-.noNormalizeCols <- function(x, ...) {
-  return(x)
-}
-
-# 3. Overwrite the function
-assign(".normalizeCols", .noNormalizeCols, envir = asNamespace("ArchR"))
-
-# Step 4: Lock it back for safety (optional)
-lockBinding(".normalizeCols", asNamespace("ArchR"))
-```
-
-### add to forebrain
-```{r
-cells <- ArchR_lineage_neuro_TRS$Forebrain$cellNames[ArchR_lineage_neuro_TRS$Forebrain$cellNames %in% colnames(TRS_matrix)]
-ArchR_lineage_neuro_TRS$Forebrain <- ArchR_lineage_neuro_TRS$Forebrain[ArchR_lineage_neuro_TRS$Forebrain$cellNames %in% cells,]
-matrix <- TRS_matrix[,cells]
-colnames(matrix) == ArchR_lineage_neuro_TRS$Forebrain$cellNames
-se <- SummarizedExperiment::SummarizedExperiment(assays = list(data = matrix),
-                                                 rowData = DataFrame(feature = rownames(matrix)),
-                                                 colData = DataFrame(cellNames = colnames(matrix)))
-
-# prepare summarizedExperiment object
-seRNA <- import10xFeatureMatrix(input = c("./data_input/data_EHB_multiome/filtered_feature_bc_matrix.h5"), names = c("SINAG3"))
-seTRS <- seRNA
-seTRS@colData <- se@colData
-seTRS@assays <- se@assays
-seTRS@NAMES <- se@NAMES
-seTRS@elementMetadata <- se@elementMetadata
-seTRS@rowRanges <- seTRS@rowRanges[1:4]
-rownames(seTRS) <- se@NAMES
-
-# adding TRS as gene expression matrix -> this is stored in the arrow files!!! MUST BACK UP!!!
-ArchR_lineage_neuro_TRS$Forebrain <- addGeneExpressionMatrix(ArchR_lineage_neuro_TRS$Forebrain, seTRS, force = TRUE)
-getAvailableMatrices(ArchR_lineage_neuro_TRS$Forebrain)
-getFeatures(ArchR_lineage_neuro_TRS$Forebrain, useMatrix = "GeneExpressionMatrix")
-```
-
-```{r
-# check matrix: raw TRS score!
-ArchR_TRS_matrix <- getMatrixFromProject(ArchR_lineage_neuro_TRS$Forebrain, useMatrix = "GeneExpressionMatrix")
-ArchR_TRS_matrix@assays@data$GeneExpressionMatrix[,colnames(matrix)[1:5]]
-matrix[,1:5]
-```
-
-### add to cerebellum pons
-```{r
-cells <- ArchR_lineage_neuro_TRS$CerebellumPons$cellNames[ArchR_lineage_neuro_TRS$CerebellumPons$cellNames %in% colnames(TRS_matrix)]
-ArchR_lineage_neuro_TRS$CerebellumPons <- ArchR_lineage_neuro_TRS$CerebellumPons[ArchR_lineage_neuro_TRS$CerebellumPons$cellNames %in% cells,]
-matrix <- TRS_matrix[,cells]
-colnames(matrix) == ArchR_lineage_neuro_TRS$CerebellumPons$cellNames
-se <- SummarizedExperiment::SummarizedExperiment(assays = list(data = matrix),
-                                                 rowData = DataFrame(feature = rownames(matrix)),
-                                                 colData = DataFrame(cellNames = colnames(matrix)))
-
-# prepare summarizedExperiment object
-seTRS <- seRNA
-seTRS@colData <- se@colData
-seTRS@assays <- se@assays
-seTRS@NAMES <- se@NAMES
-seTRS@elementMetadata <- se@elementMetadata
-seTRS@rowRanges <- seTRS@rowRanges[1:4]
-rownames(seTRS) <- se@NAMES
-
-# copy arrow files to new directory
-ArchR_lineage_neuro_TRS[["Forebrain"]]@sampleColData@listData[["ArrowFiles"]] <- 
-  sub("ArrowFiles","ArrowFiles_with_TRS", ArchR_lineage_neuro_TRS[["Forebrain"]]@sampleColData@listData[["ArrowFiles"]])
-ArchR_lineage_neuro_TRS[["CerebellumPons"]]@sampleColData@listData[["ArrowFiles"]] <- 
-  sub("ArrowFiles","ArrowFiles_with_TRS", ArchR_lineage_neuro_TRS[["CerebellumPons"]]@sampleColData@listData[["ArrowFiles"]])
-
-# adding TRS as gene expression matrix -> stored in the new arrow files!
-ArchR_lineage_neuro_TRS$CerebellumPons <- addGeneExpressionMatrix(ArchR_lineage_neuro_TRS$CerebellumPons, seTRS, force = TRUE)
-getAvailableMatrices(ArchR_lineage_neuro_TRS$CerebellumPons)
-getFeatures(ArchR_lineage_neuro_TRS$CerebellumPons, useMatrix = "GeneExpressionMatrix")
-```
-
-### save
-```{r}
-save(ArchR_lineage_neuro_TRS, file = "./data_rda/Script7/ArchR_lineage_neuro_TRS.rda")
-```
-
-
-## (2) pseudotime disease risk
-### find regions/stages of interest
-```{r
-p <- list()
-for (x in c("Forebrain","CerebellumPons")){
-  for (y in c("Early", "Late")){
-    for (z in disease){
-      trajectory <- paste0(x, "_", y)
-      name <- paste0(x, "_", y, "_", z)
-      p[[name]] <- plotTrajectory(ArchR_lineage_neuro_TRS[[x]], embedding = "UMAP_neuro", trajectory = trajectory, 
-                                  colorBy = "GeneExpressionMatrix", name = z, plotAs = "points")
-      gc()
-    }
-  }
-  rm(x, y, z, name, trajectory)
-}
-p1 <- unlist(p, recursive = FALSE)
-
-for (x in disease){
-  png(paste0("./ArchR_EHB/Plots/Script7/pseudotime_TRS_neuro_",x,".png"), width = 3500, height = 1700, res = 200)
-  print(wrap_plots(p1[grep(x,names(p1))], ncol=4, byrow=FALSE, heights=c(3,1)))
-  dev.off()
-  rm(x)
-}
-```
-
-### main fig - average TRS
-```{r}
-# get TRS-pseudotime smoothed matrix ~ 10s
-trajTRS_smoothed <- list()
-for (x in c("Forebrain","CerebellumPons")){
-  for (y in c("Early", "Late")){
-    i <- paste0(x,"_",y)
-    
-    # get average TRS
-    bins <- 50 # dividing pseudotime into 100 bins
-    trajTRS <- getTrajectory(ArchR_lineage_neuro_TRS[[x]], name = y, useMatrix = "GeneExpressionMatrix",
-                             log2Norm = FALSE, trajectoryLabel = "ctAnnot_2.0", scaleTo = NULL, 
-                             groupEvery = 100/bins, smoothWindow = 10)
-    trajTRS_smoothed[[i]] <- as.data.frame(trajTRS@assays@data$smoothMat)
-    
-    # calculate nCell per bin
-    nCellperBin <- as.vector(table(cut(ArchR_lineage_neuro_TRS[[x]]@cellColData[[i]], breaks = seq(0, 100, by = 100/bins), 
-                             include.lowest = TRUE, right = FALSE)))
-    trajTRS_smoothed[[i]] <- trajTRS_smoothed[[i]]/nCellperBin
-    
-    # formatting
-    trajTRS_smoothed[[i]]$condition <- getFeatures(ArchR_lineage_neuro_TRS[[x]], useMatrix = "GeneExpressionMatrix")
-    trajTRS_smoothed[[i]]$group <- i
-    trajTRS_smoothed[[i]] <- pivot_longer(trajTRS_smoothed[[i]], 1:bins, names_to = "timepoint", values_to = "TRS")
-    
-  }
-}
-rm(i,x,y,trajTRS)
-
-# formatting
-trajTRS_smoothed_all <- do.call(rbind, trajTRS_smoothed)
-trajTRS_smoothed_all$pseudotime <- as.numeric(sub(".*_","",trajTRS_smoothed_all$timepoint))
-row.names(trajTRS_smoothed_all) <- NULL
-trajTRS_smoothed_all$group <- stri_replace_all_regex(trajTRS_smoothed_all$group, pattern = c("Forebrain","CerebellumPons"), 
-                                                     replacement = c("FB","CP"), vectorize_all = FALSE)
-
-# plotting
-ggplot(trajTRS_smoothed_all, aes(x = pseudotime, y = TRS, group = group, colour = group)) +
-  geom_line() + facet_wrap(~condition, ncol=1) + BuenColors::pretty_plot() +
-  scale_colour_manual(values = c("CP_Early"="#53CC67", "CP_Late"="#018017", "FB_Early"="#FDE333", "FB_Late"="#c2a802")) +
-  theme(legend.position = "none")
-```
-
-
-### main fig - permutation per bin
-```{r}
-load("./data_rda/Script4/permutation_result.rda")
+load("./data_rda/Script4/SCAVENGE_with_permutation.rda")
 rm(mono_mat_permu_all)
-disease <- c("PD","BP","ASD","ADHD")
+
+# load lineages
+load("./data_rda/Script7/ArchR_lineage_neuro.rda")
+load("./data_rda/Script7/ArchR_lineage_glial.rda")
 ```
 
+
+## (1) TRS ~ chromVAR: neuro
 ```{r}
-# get proportions in each bin
-sig_summary <- data.frame()
-for (z in disease){
-  sigCells <- mono_mat_permu_ct[[z]]$names[mono_mat_permu_ct[[z]]$true_cell_top_idx == TRUE]
-  
-  for (x in c("Forebrain","CerebellumPons")){
-    for (y in c("Early","Late")){
-      for (bin in seq(2, 100, by = 2)){
-        i <- paste0(x,"_",y)  
-        cell_in_bin <- ArchR_lineage_neuro_TRS[[x]]@cellColData@rownames[ArchR_lineage_neuro_TRS[[x]]@cellColData@listData[[i]] <= bin &
-                            ArchR_lineage_neuro_TRS[[x]]@cellColData@listData[[i]] > bin - 2]
-        cell_in_bin <- as.vector(na.omit(cell_in_bin))
-        a <- sum(cell_in_bin %in% sigCells)
-        b <- length(cell_in_bin)
-        sig_summary <- rbind(sig_summary, c(z,x,y,i,bin,a,b,a/b))
-      }
-    }
-  }
-  rm(x,y,z,i,sigCells,cell_in_bin,bin,a,b)
-}
-names(sig_summary) <- c("disease","region","stage","group","pseudotime","sigCells","allCells","prop")
-sig_summary$prop <- as.numeric(sig_summary$prop)
-sig_summary$sigCells <- as.numeric(sig_summary$sigCells)
-sig_summary$allCells <- as.numeric(sig_summary$allCells)
-sig_summary$pseudotime <- as.numeric(sig_summary$pseudotime)
-sig_summary$group <- stri_replace_all_regex(sig_summary$group, pattern = c("Forebrain","CerebellumPons"), 
-                                            replacement = c("FB","CP"), vectorize_all = FALSE)
-
-# compute odds ratio for each bin
-sig_summary$odds_ratio <- (sig_summary$sigCells / (sig_summary$allCells - sig_summary$sigCells)) / 
-  ((sum(sig_summary$sigCells) - sig_summary$sigCells) / (sum(sig_summary$allCells) - sum(sig_summary$sigCells) - (sig_summary$allCells - sig_summary$sigCells)))
-
-# perform two-sided hypergeometric test
-sig_summary$p_value <- phyper(sig_summary$sigCells - 1, sum(sig_summary$sigCells), 
-                              sum(sig_summary$allCells) - sum(sig_summary$sigCells), sig_summary$allCells, lower.tail = FALSE)
-sig_summary$FDR <- p.adjust(sig_summary$p_value, method = "BH")
-
-# significant bins: FDR <= 0.05
-sig_summary$text <- ""
-sig_summary$text[sig_summary$FDR < 0.05] <- "significant"
-```
-
-```{r}
-# plotting
-ggplot(sig_summary, aes(x = pseudotime, y = odds_ratio, group = group, colour = group)) +
-  geom_line() + facet_wrap(~disease, ncol=1) + BuenColors::pretty_plot() +
-  scale_colour_manual(values = c("CP_Early"="#53CC67", "CP_Late"="#018017", "FB_Early"="#FDE333", "FB_Late"="#c2a802")) +
-  theme(legend.position = "none")
-```
-
-
-## (3) TRS ~ chromVAR
-### find genes of interest
-```{r
-# select TFs that have correlated TRS and motif chromVAR z score ~ 1 min
-correlation_table <- list()
-heatmap <- list()
-for (x in c("Forebrain","CerebellumPons")){
-  for (y in paste0(x, "_", c("Early","Late"))){
+# align TRS and chromVAR to pseudotime, compute odds ratio and correlation ~ 50s
+TRS_summary_neuro <- list()
+correlation_summary_neuro <- list()
+for (x in names(ArchR_lineage_neuro)){
+  for (y in paste0(x,"_",c("Early","Late"))){
+    
     print(y)
-    
-    # get TRS and chromVAR trend using pseudotime bins
-    trajMotif  <- getTrajectory(ArchR_lineage_neuro_TRS[[x]], name = y, useMatrix = "MotifMatrix", 
+    TRS_summary_neuro[[y]] <- data.frame()
+    correlation_summary_neuro[[y]] <- data.frame()
+    trajMotif  <- getTrajectory(ArchR_lineage_neuro[[x]], name = y, useMatrix = "MotifMatrix", 
                                 log2Norm = FALSE, trajectoryLabel = "ctAnnot_2.0")
-    trajTRS <- getTrajectory(ArchR_lineage_neuro_TRS[[x]], name = y, useMatrix = "GeneExpressionMatrix", 
-                                   log2Norm = FALSE, trajectoryLabel = "ctAnnot_2.0", scaleTo = NULL)
-    names(trajTRS) <- sub(".*:","",names(trajTRS))
+    trajMotif <- as.data.frame(t(assay(trajMotif)))
+    trajMotif <- trajMotif[,grepl("z:",names(trajMotif))] # keep only the deviation z score (raw deviation score affected by read depth)
     
-    # correlation for all TFs
-    correlation_table[[y]] <- data.frame()
-    for (a in 1:nrow(trajTRS)){
-      for (b in (nrow(trajMotif)/2+1):nrow(trajMotif)){
-        out <- cor.test(trajTRS@assays@data$mat[a,], trajMotif@assays@data$smoothMat[b,], use = "complete.obs", method = "spearman")
-        out <- data.frame(p_value = out$p.value, coefficient = out$estimate, 
-                          disease = names(trajTRS)[a], motif = names(trajMotif)[b])
-        correlation_table[[y]] <- rbind(correlation_table[[y]], out)
+    for (z in names(mono_mat_permu_ct)){
+      print(z)
+      
+      # get TRS and pseudotime for cells in this trajectory
+      TRS <- mono_mat_permu_ct[[z]][,c("names","TRS","true_cell_top_idx")]
+      TRS <- TRS[getCellNames(ArchR_lineage_neuro[[x]]),]
+      TRS$pseudotime <- ArchR_lineage_neuro[[x]]@cellColData@listData[[y]]
+      TRS <- na.omit(TRS)
+      
+      # average TRS per pseudotime bin (bin size = 1)
+      TRS$bin <- pmin(floor(TRS$pseudotime) + 1, 100)
+      TRS_temp <- data.frame()
+      for(i in 1:100){
+        TRS_temp <- rbind(TRS_temp, c(z, i, mean(TRS$TRS[TRS$bin==i])))
       }
-      rm(a, b)
-    }
-    correlation_table[[y]]$FDR <- p.adjust(correlation_table[[y]]$p_value, method = "fdr")
-    
-    heatmap[[y]] <- list()
-    for (z in disease){
-      # significant correlations: FDR <= 0.01, correlation >=0.6
-      cor <- correlation_table[[y]][correlation_table[[y]]$disease==z,]
-      sig <- cor$motif[cor$FDR <= 0.01 & cor$coefficient >= 0.6]
-
-      # plotting
-      if (length(sig) > 1){
-        heatmap[[y]][[z]] <- plotTrajectoryHeatmap(trajMotif[sig,],  varCutOff = 0, pal = paletteContinuous(set = "solarExtra"))  
+      names(TRS_temp) <- c("condition", "bin","TRS")
+      TRS_temp$TRS <- as.numeric(TRS_temp$TRS)
+      
+      # odds ratio and p-value per pseudotime bin (bin size = 1)
+      sig_summary <- data.frame()
+      for(i in 1:100){
+        sig_summary <- rbind(sig_summary, c(i, sum(TRS$bin==i & TRS$true_cell_top_idx==TRUE), sum(TRS$bin==i)))
       }
+      names(sig_summary) <- c("bin","sigCells","allCells")
+      sig_summary$odds_ratio <- (sig_summary$sigCells / (sig_summary$allCells - sig_summary$sigCells)) /
+        ((sum(sig_summary$sigCells) - sig_summary$sigCells) / 
+           (sum(sig_summary$allCells) - sum(sig_summary$sigCells) - (sig_summary$allCells - sig_summary$sigCells)))
+      TRS_temp$odds_ratio <- sig_summary$odds_ratio
+      TRS_summary_neuro[[y]] <- rbind(TRS_summary_neuro[[y]], TRS_temp)
+        
+      # correlation: TRS ~ chromVAR
+      cor <- data.frame()
+      for (tf in names(trajMotif)){
+        out <- cor.test(trajMotif[[tf]], TRS_temp$TRS, method = "spearman",exact = FALSE)
+        cor <- rbind(cor, data.frame(condition = z, TF = tf, p_value = out$p.value, coefficient = out$estimate))
+      }
+      cor$FDR <- p.adjust(cor$p_value, method = "BH")
+      correlation_summary_neuro[[y]] <- rbind(correlation_summary_neuro[[y]], cor)
     }
-    rm(z)
   }
-  rm(x, y, cor, trajMotif, trajTRS)
 }
-save(correlation_table, heatmap, file = "./data_rda/Script7/trajCor_TRS.rda")
+rm(x,y,z,i, TRS,TRS_temp, sig_summary, trajMotif,out,tf)
 ```
 
-```{r
-pdf("./ArchR_EHB/Plots/Script7/pseudotime_heatmap_TRS_neuro.pdf", width = 6, height = 6)
-for (x in names(heatmap)){
-  for(y in names(heatmap[[x]])){
-    print(heatmap[[x]][[y]])  
-  }
-  rm(x, y)
-}
-dev.off()
-```
 
-
-### main fig - top 10 correlated TFs
+## (2) TRS ~ chromVAR: glial
 ```{r}
-load("./data_rda/Script7/ArchR_lineage_neuro_TRS.rda")
-load("./data_rda/Script7/trajCor_TRS.rda")
+# align TRS and chromVAR to pseudotime, compute odds ratio and correlation ~ 15s
+TRS_summary_glial <- list()
+correlation_summary_glial <- list()
+for (x in c("CerebellumPons","Medulla")){
+  for (y in paste0(x,"_Late")){
+    
+    print(y)
+    TRS_summary_glial[[y]] <- data.frame()
+    correlation_summary_glial[[y]] <- data.frame()
+    trajMotif  <- getTrajectory(ArchR_lineage_glial[[x]], name = y, useMatrix = "MotifMatrix", 
+                            log2Norm = FALSE, trajectoryLabel = "ctAnnot_2.0")
+    trajMotif <- as.data.frame(t(assay(trajMotif)))
+    trajMotif <- trajMotif[,grepl("z:",names(trajMotif))] # keep only the deviation z score (raw deviation score affected by read depth)
+    
+    for (z in names(mono_mat_permu_ct)){
+      print(z)
+      
+      # get TRS and pseudotime for cells in this trajectory
+      TRS <- mono_mat_permu_ct[[z]][,c("names","TRS","true_cell_top_idx")]
+      TRS <- TRS[getCellNames(ArchR_lineage_glial[[x]]),]
+      TRS$pseudotime <- ArchR_lineage_glial[[x]]@cellColData@listData[[y]]
+      TRS <- na.omit(TRS)
+      
+      # average TRS per pseudotime bin (bin size = 1)
+      TRS$bin <- pmin(floor(TRS$pseudotime) + 1, 100)
+      TRS_temp <- data.frame()
+      for(i in 1:100){
+        TRS_temp <- rbind(TRS_temp, c(z, i, mean(TRS$TRS[TRS$bin==i])))
+      }
+      names(TRS_temp) <- c("condition", "bin","TRS")
+      TRS_temp$TRS <- as.numeric(TRS_temp$TRS)
+      
+      # odds ratio and p-value per pseudotime bin (bin size = 1)
+      sig_summary <- data.frame()
+      for(i in 1:100){
+        sig_summary <- rbind(sig_summary, c(i, sum(TRS$bin==i & TRS$true_cell_top_idx==TRUE), sum(TRS$bin==i)))
+      }
+      names(sig_summary) <- c("bin","sigCells","allCells")
+      sig_summary$odds_ratio <- (sig_summary$sigCells / (sig_summary$allCells - sig_summary$sigCells)) /
+        ((sum(sig_summary$sigCells) - sig_summary$sigCells) / 
+           (sum(sig_summary$allCells) - sum(sig_summary$sigCells) - (sig_summary$allCells - sig_summary$sigCells)))
+      TRS_temp$odds_ratio <- sig_summary$odds_ratio
+      TRS_summary_glial[[y]] <- rbind(TRS_summary_glial[[y]], TRS_temp)
+      
+      # correlation: TRS ~ chromVAR
+      cor <- data.frame()
+      for (tf in names(trajMotif)){
+        out <- cor.test(trajMotif[[tf]], TRS_temp$TRS, method = "spearman",exact = FALSE)
+        cor <- rbind(cor, data.frame(condition = z, TF = tf, p_value = out$p.value, coefficient = out$estimate))
+      }
+      cor$FDR <- p.adjust(cor$p_value, method = "BH")
+      correlation_summary_glial[[y]] <- rbind(correlation_summary_glial[[y]], cor)
+    }
+  }
+}
+rm(x,y,z,i, TRS,TRS_temp, sig_summary, trajMotif,out,tf)
 ```
 
+```{r}
+rm(mono_mat_permu_ct)
+gc()
+```
+
+```{r}
+save(TRS_summary_neuro, correlation_summary_neuro,
+     TRS_summary_glial, correlation_summary_glial, file = "./data_rda/script7/TRS_correlation.rda")
+```
+
+
+## (3) plotting
+```{r}
+load("./data_rda/script7/TRS_correlation.rda")
+
+# significant disease-ct associations from SCAVENGE
+load("./data_rda/script4/sig_summary_ct.rda")
+sig_summary_ct <- sig_summary_ct[sig_summary_ct$text != "", ]
+SCAVENGE_sig_neuro <- sig_summary_ct[sub("_.*","",sig_summary_ct$ctRegion) %in% c("Neuron","Neuroblast","n-IPC"), 1:2]
+SCAVENGE_sig_neuro$celltype <- sub("_.*","",SCAVENGE_sig_neuro$ctRegion)
+SCAVENGE_sig_neuro$rg <- sub(".*_","",SCAVENGE_sig_neuro$ctRegion)
+SCAVENGE_sig_neuro$region  <- stri_replace_all_regex(SCAVENGE_sig_neuro$rg, pattern = c("FB","CP","MD"),
+                                                     replacement = c("Forebrain","CerebellumPons","Medulla"), vectorize_all = FALSE)
+SCAVENGE_sig_glial <- sig_summary_ct[sub("_.*","",sig_summary_ct$ctRegion) %in% c("Glioblast"), 1:2]
+SCAVENGE_sig_glial$celltype <- sub("_.*","",SCAVENGE_sig_glial$ctRegion)
+SCAVENGE_sig_glial$rg <- sub(".*_","",SCAVENGE_sig_glial$ctRegion)
+SCAVENGE_sig_glial$region  <- stri_replace_all_regex(SCAVENGE_sig_glial$rg, pattern = c("FB","CP","MD"),
+                                                     replacement = c("Forebrain","CerebellumPons","Medulla"), vectorize_all = FALSE)
+rm(sig_summary_ct)
+
+# colours
+colours <- c(RColorBrewer::brewer.pal(12, "Paired"), "#F0027F")
+names(colours) <- unique(TRS_summary_neuro[[1]]$condition)
+colours
+```
+
+### main fig - TRS per bin (neuro)
+```{r}
+p <- list()
+for (x in c("Forebrain","CerebellumPons","Medulla")){
+  for (y in paste0(x,"_",c("Early","Late"))){
+    df <- TRS_summary_neuro[[y]]
+    df$bin <- as.numeric(df$bin)
+    
+    # only plot diseases that were previously found to have enriched risk in this brain region
+    highlight <- unique(SCAVENGE_sig_neuro$disease[SCAVENGE_sig_neuro$region==x])
+    df <- df[df$condition %in% highlight,]
+    
+    # must normalise the TRS within each disease (raw TRS are not directly comparable among diseases!)
+    df$TRS_norm <- NULL
+    for (z in highlight){
+      df$TRS_norm[df$condition==z] <- as.vector(scale(df$TRS[df$condition==z]))
+    }
+    
+    # plotting
+    p[[y]] <- ggplot(df, aes(x=bin, y=TRS_norm, group=condition, colour=condition)) +
+      geom_line(linewidth = 0.4) + BuenColors::pretty_plot() + 
+      ggtitle(y) + xlab("pseudotime") + ylab("normalised TRS") +
+      scale_colour_manual(values = colours) +
+      theme(plot.title = element_text(size=10), legend.margin = margin(0, 0, 0, 0))
+  }
+}
+for (x in c(1,3,5)){
+  p[[x]] <- p[[x]] + theme(legend.position = "none")
+}
+for (x in c(2,4,6)){
+  p[[x]] <- p[[x]] + theme(axis.title.y = element_blank())
+}
+for (x in c(1:4)){
+  p[[x]] <- p[[x]] + theme(axis.title.x = element_blank())
+}
+rm(x,y,z,df)
+```
+
+```{r, fig.width=4.8, fig.height=4.7, dpi=300}
+wrap_plots(p, ncol=2)
+```
+
+
+### supp fig - TRS per bin (glial)
+```{r}
+p <- list()
+for (x in c("CerebellumPons","Medulla")){
+  for (y in paste0(x,"_",c("Late"))){
+    df <- TRS_summary_glial[[y]]
+    df$bin <- as.numeric(df$bin)
+    
+    # only plot diseases that were previously found to have enriched risk in this brain region
+    highlight <- unique(SCAVENGE_sig_glial$disease[SCAVENGE_sig_glial$region==x])
+    df <- df[df$condition %in% highlight,]
+    
+    # must normalise the TRS within each disease (raw TRS are not directly comparable among diseases!)
+    df$TRS_norm <- NULL
+    for (z in highlight){
+      df$TRS_norm[df$condition==z] <- as.vector(scale(df$TRS[df$condition==z]))
+    }
+    
+    # plotting
+    p[[y]] <- ggplot(df, aes(x=bin, y=TRS_norm, group=condition, colour=condition)) +
+      geom_line() + BuenColors::pretty_plot() + 
+      ggtitle(y) + xlab("pseudotime") + ylab("normalised TRS") +
+      scale_colour_manual(values = colours) +
+      theme(plot.title = element_text(size=11), aspect.ratio = 0.5)
+  }
+}
+rm(x,y,z,df)
+
+wrap_plots(p, ncol=2)
+```
+
+
+### supp fig - correlated TFs (neuro late)
 ```{r}
 # get significant correlations (FDR <= 0.01, correlation >= 0.6)
-correlation_sig <- list()
-for (x in c("Forebrain_Late","CerebellumPons_Late")){
-  cor <- correlation_table[[x]]
+correlation_summary <- list()
+for (x in c("Forebrain_Late","CerebellumPons_Late","Medulla_Late")){
+  cor <- correlation_summary_neuro[[x]]
   cor <- cor[cor$FDR <= 0.01 & cor$coefficient >= 0.6,]
   if (nrow(cor) > 0){
     cor$group <- x
-    correlation_sig[[x]] <- cor  
+    correlation_summary[[x]] <- cor  
   }
   rm(x, cor)
 }
-correlation_summary <- do.call(rbind, correlation_sig)
-correlation_summary$motif <- sub(".*z:","",sub("_.*","",correlation_summary$motif))
+correlation_summary <- do.call(rbind, correlation_summary)
+correlation_summary$TF <- sub(".*z:","",sub("_.*","",correlation_summary$TF))
 row.names(correlation_summary) <- NULL
-correlation_summary$group <- stri_replace_all_regex(correlation_summary$group, pattern = c("Forebrain_Late", "CerebellumPons_Late"),
-                                                    replacement = c("FB", "CP"), vectorize_all = FALSE)
-names(correlation_summary)[2] <- "correlation"
-correlation_summary$group <- factor(correlation_summary$group, levels = c("FB","CP"))
+correlation_summary$region <- stri_replace_all_regex(correlation_summary$group, 
+                                                    pattern = c("Forebrain_Late","CerebellumPons_Late","Medulla_Late"),
+                                                    replacement = c("FB", "CP","MD"), vectorize_all = FALSE)
+correlation_summary$region <- factor(correlation_summary$region, levels = c("FB","CP","MD"))
+```
 
-# get top TFs per disease-group
-correlation_top <- correlation_summary %>% group_by(group, disease) %>% slice_max(order_by = correlation, n = 10, with_ties = FALSE)
-correlation_top$group <- stri_replace_all_regex(correlation_top$group, pattern = c("Forebrain_Late", "CerebellumPons_Late"),
-                                                  replacement = c("FB", "CP"), vectorize_all = FALSE)
-correlation_top$group <- factor(correlation_top$group, levels = c("FB","CP"))
+```{r}
+# only look at significant disease-associated regions!
+interest <- unique(SCAVENGE_sig_neuro[,c("disease","rg")])
+correlation_summary_neuro_fil <- data.frame()
+for (x in 1:nrow(interest)){
+  correlation_summary_neuro_fil <- rbind(correlation_summary_neuro_fil, 
+                                   correlation_summary[correlation_summary$condition == interest$disease[x] & 
+                                                         correlation_summary$region == interest$rg[x], ]) 
+}
 
-# plotting
-ggplot(correlation_top, aes(x=motif, y=disease, colour=correlation, size = correlation)) +
-  geom_point() + facet_wrap(~group, ncol=2, scales = "free_x") + xlab("") + ylab("") + theme_bw() + 
-  ggtitle("Top correlated TFs in the late stage") + 
+# select top TFs to plot
+correlation_top <- correlation_summary_neuro_fil %>% group_by(group, condition) %>% slice_max(order_by = coefficient, n = 10, with_ties = FALSE)
+correlation_top$TF[correlation_top$TF=="ENSG00000234254"] <- "ENSG000-\n00234254"
+```
+
+```{r}
+# plotting: top 10 correlated for each condition
+ggplot(correlation_top, aes(x=TF, y=condition, colour=coefficient)) +
+  geom_point(size=5) + facet_wrap(~group, ncol=1, scales = "free") + xlab("") + ylab("") + theme_bw() + 
+  ggtitle("Top correlated TFs in neuronal lineages (TRS ~ chromVAR)") + 
   theme(plot.title = element_text(size = 11), axis.text.x = element_text(angle=90, hjust=1), 
         strip.background = element_rect(fill = "white", color = "black")) +
-  scale_size(range = c(2, 4), breaks = c(0.65, 0.7, 0.75, 0.8))  +  
   guides(colour = guide_legend(order = 1), size = guide_legend(order = 1))
 ```
 
-### fig - all correlated TFs (correlation>=0.6)
+### supp fig - correlated TFs (glial)
 ```{r}
-# plotting
-ggplot(correlation_summary, aes(x=group, y=motif, colour=correlation, size = correlation)) +
-  geom_point() + facet_wrap(~disease, ncol=4, scales = "free_y") + xlab("") + ylab("") + theme_bw() + 
-  ggtitle("All correlated TFs in the late stage") + 
-  theme(plot.title = element_text(size = 11), strip.background = element_rect(fill = "white", color = "black")) +
-  scale_size(range = c(2, 4), breaks = c(0.65, 0.7, 0.75, 0.8)) +
+# get significant correlations (FDR <= 0.01, correlation >= 0.6)
+correlation_summary <- list()
+for (x in c("CerebellumPons_Late","Medulla_Late")){
+  cor <- correlation_summary_glial[[x]]
+  cor <- cor[cor$FDR <= 0.01 & cor$coefficient >= 0.6,]
+  if (nrow(cor) > 0){
+    cor$group <- x
+    correlation_summary[[x]] <- cor  
+  }
+  rm(x, cor)
+}
+correlation_summary <- do.call(rbind, correlation_summary)
+correlation_summary$TF <- sub(".*z:","",sub("_.*","",correlation_summary$TF))
+row.names(correlation_summary) <- NULL
+correlation_summary$region <- stri_replace_all_regex(correlation_summary$group, 
+                                                    pattern = c("CerebellumPons_Late","Medulla_Late"),
+                                                    replacement = c("CP","MD"), vectorize_all = FALSE)
+correlation_summary$region <- factor(correlation_summary$region, levels = c("CP","MD"))
+```
+
+```{r}
+# only look at significant disease-associated regions!
+interest <- unique(SCAVENGE_sig_glial[,c("disease","rg")])
+correlation_summary_glial_fil <- data.frame()
+for (x in 1:nrow(interest)){
+  correlation_summary_glial_fil <- rbind(correlation_summary_glial_fil, 
+                                   correlation_summary[correlation_summary$condition == interest$disease[x] & 
+                                                         correlation_summary$region == interest$rg[x], ]) 
+}
+
+# select top TFs to plot
+correlation_top <- correlation_summary_glial_fil %>% group_by(group, condition) %>% slice_max(order_by = coefficient, n = 10, with_ties = FALSE)
+```
+
+```{r}
+# plotting: top 10 correlated for each condition
+ggplot(correlation_top, aes(x=TF, y=condition, colour=coefficient)) +
+  geom_point(size=5) + facet_wrap(~group, ncol=1, scales = "free") + xlab("") + ylab("") + theme_bw() + 
+  ggtitle("Top correlated TFs in glial lineages (TRS ~ chromVAR)") + 
+  theme(plot.title = element_text(size = 11), axis.text.x = element_text(angle=90, hjust=1), 
+        strip.background = element_rect(fill = "white", color = "black")) +
   guides(colour = guide_legend(order = 1), size = guide_legend(order = 1))
 ```
 
-### supp table
+### supp table - correlated TFs (neuro + glial, 3 brain regions, late stage)
 ```{r}
-names(correlation_summary)[6] <- "region"
-correlation_summary$region <- stri_replace_all_regex(correlation_summary$region, pattern = c("FB", "CP"),
-                                                  replacement = c("Forebrain", "CerebellumPons"), vectorize_all = FALSE)
-correlation_summary <- correlation_summary[,c(4,6,3,2,1,5)]
-writexl::write_xlsx(correlation_summary, path = "./data_output/Script7/TF_correlation_summary.xlsx")
+# neuronal lineages
+corA <- correlation_summary_neuro
+for (x in c("Forebrain","CerebellumPons","Medulla")){
+  for(y in c("Early", "Late")){
+    corA[[paste0(x,"_",y)]]$lineage <- "neuronal"
+    corA[[paste0(x,"_",y)]]$region <- x
+    corA[[paste0(x,"_",y)]]$stage <- y
+  }
+}
+corA <- do.call(rbind, corA)
+corA <- corA[corA$FDR <= 0.01 & corA$coefficient >= 0.6,]
+row.names(corA) <- NULL
+corA$TF <- sub("_.*","", sub("z:","",corA$TF))
+
+# glial lineages
+corB <- correlation_summary_glial
+for (x in c("CerebellumPons","Medulla")){
+  for(y in c("Late")){
+    corB[[paste0(x,"_",y)]]$lineage <- "glial"
+    corB[[paste0(x,"_",y)]]$region <- x
+    corB[[paste0(x,"_",y)]]$stage <- y
+  }
+}
+corB <- do.call(rbind, corB)
+corB <- corB[corB$FDR <= 0.01 & corB$coefficient >= 0.6,]
+row.names(corB) <- NULL
+corB$TF <- sub("_.*","", sub("z:","",corB$TF))
+
+# combined
+cor <- rbind(corA, corB)
+cor <- cor[,c("lineage","region","stage","condition","TF","p_value","FDR","coefficient")]
+writexl::write_xlsx(cor, path = "./data_output/Script7_TF/TF_correlation_TRSxchromVAR.xlsx")
+```
+
+
+
+# 4. ~ SCENIC (neuronal)
+## (1) identify regulon (Eze RNA)
+### prepare expression matrix
+```{r}
+# inspect data
+load("./data_input/ZEB2_pattern/Seurat_Eze.rda")
+table(Seurat_Eze$Age, Seurat_Eze$Cell.Type)
+table(Seurat_Eze$Cell.Type)
+
+# filter RG+neuronal cells
+Seurat_Eze_fil <- Seurat_Eze[,Seurat_Eze$Cell.Type %in% c("Radial Glial","Neuronal")]
+Seurat_Eze_fil # 16022 genes, 18461 cells
+rm(Seurat_Eze)
+gc()
+
+# keep genes that are present in more than 5% cells
+counts_matrix <- GetAssayData(Seurat_Eze_fil, assay = "RNA", slot = "counts")
+counts_matrix <- t(as.matrix(counts_matrix))
+keep_genes <- colnames(counts_matrix)[Matrix::colSums(counts_matrix > 0) >= nrow(counts_matrix) * 0.05]
+"ZEB2" %in% keep_genes
+counts_matrix <- counts_matrix[, keep_genes]
+dim(counts_matrix) # 18461 cells, 8233 genes: matrix must < 23170x11909, otherwise grnboost2 fails to initiate
+
+# save for SCENIC ~ 30s
+write.table(counts_matrix, "./data_output/Script7_SCENIC/data/Eze_counts_all.txt", sep = '\t', quote=FALSE)
+rm(Seurat_Eze_fil)
+gc()
+```
+
+
+### setup for pySCENIC
+Preparation: use existing resources from *script6_SCENIC*
+```{bash}
+cd Downloads/P1_EHB/data_output/script7_SCENIC
+conda activate pyscenic
+python
+```
+
+```{python}
+import os
+import glob
+import pickle
+import pandas as pd
+import numpy as np
+from dask.diagnostics import ProgressBar
+from arboreto.utils import load_tf_names
+from arboreto.algo import grnboost2
+from ctxcore.rnkdb import FeatherRankingDatabase as RankingDatabase
+from pkg_resources import DistributionNotFound, get_distribution
+from pyscenic.utils import modules_from_adjacencies, load_motifs
+from pyscenic.prune import prune2df, df2regulons
+from pyscenic.aucell import aucell
+```
+
+```{python}
+# load expression data
+ex_matrix = pd.read_csv("./data/Eze_counts_all.txt", sep='\t', header=0, index_col=0)
+ex_matrix # 18461 cells, 8233 genes
+
+# load known TFs
+tf_names = load_tf_names("../Script6_SCENIC/resources/allTFs_hg38.txt")
+tf_names[:5]
+
+# load ranking database (feather data)
+db_fnames = glob.glob("../Script6_SCENIC/databases/hg38_10kbp_up_10kbp_down_full_tx_v10_clust.genes_vs_motifs.rankings.feather")
+def name(fname): 
+  return os.path.splitext(os.path.basename(fname))[0] # run by itself
+
+dbs = [RankingDatabase(fname=fname, name=name(fname)) for fname in db_fnames]
+dbs
+```
+
+```{python}
+# genes in expression matrix that overlap with feather files
+genes_overlap = set(ex_matrix.columns) & set(dbs[0].genes)
+len(genes_overlap) # 8204 overlapping genes
+
+# filter expression matrix
+ex_matrix_fil = ex_matrix.loc[:, ex_matrix.columns.isin(genes_overlap)]
+ex_matrix_fil # 18461 cells x 8204 genes
+```
+
+
+### run pySCENIC
+```{python}
+# calculate co-expression modules: CPU-intensive ~ 24 min
+import time
+start = time.time()
+adjacencies = grnboost2(ex_matrix_fil, tf_names=tf_names, verbose=True) # if matrix too large, fails within 0.1 sec
+elapsed = (time.time() - start) / 60
+print(f"{elapsed:.2f}")
+
+# add TFs to modules, keeping modules with > 20 genes
+modules = list(modules_from_adjacencies(adjacencies, ex_matrix))
+len(modules) # 5089 gene modules identified
+
+# number of genes in each module
+pd.DataFrame({"TF": [m.name for m in modules], "n_genes": [len(m.genes) for m in modules]})
+
+# save modules
+import pickle
+with open("./data/modules.pkl", "wb") as f: pickle.dump(modules, f)
+```
+
+```{python}
+# find enriched motifs and their target genes for each module ~ 5 min
+with ProgressBar(): 
+  df = prune2df(dbs, modules, "../Script6_SCENIC/resources/motifs-v10nr_clust-nr.hgnc-m0.001-o0.0.tbl", filter_for_annotation=False)
+df.to_csv("./data/motifs_noFil.csv")
+
+# create regulons from enriched motifs
+regulons = df2regulons(df)
+len(regulons) # 883 regulons (no filtering)
+
+# save the regulons
+with open("./data/regulons_noFil.p", "wb") as f: pickle.dump(regulons, f) # compatible with python only
+rows = []
+for reg in regulons:
+    for gene, weight in reg.gene2weight.items():
+        rows.append([reg.name, gene, weight])
+pd.DataFrame(rows, columns=["TF","TargetGene","Weight"]).to_csv("data/regulons_noFil.csv", index=False) # compatible with R
+```
+
+
+### calculate scATAC AUC
+```{r}
+# get gene score matrix (condense)
+options(future.globals.maxSize = 20 * 1024^4)
+for (x in names(ArchR_lineage_neuro)[3]){
+  print(x)
+  gene_score_matrix <- getMatrixFromProject(ArchR_lineage_neuro[[x]], useMatrix = "GeneScoreMatrix")
+  matrix <- assay(gene_score_matrix)
+  rownames(matrix) <- gene_score_matrix@elementMetadata@listData[["name"]]
+  matrix <- as.data.frame(t(matrix))
+  write.table(matrix, paste0("./data_output/Script7_SCENIC/data/ATAC_genescore_",x,".txt"), sep = '\t', quote=FALSE)
+  rm(x, gene_score_matrix, matrix)
+  gc()
+}
+```
+
+```{python}
+# read in regulons
+with open("./data/regulons_noFil.p", "rb") as f: regulons = pickle.load(f)
+    
+# repeat for three regions
+ex_matrix = pd.read_csv("./data/ATAC_genescore_CerebellumPons.txt", sep='\t', header=0, index_col=0)
+auc_mtx = aucell(ex_matrix, regulons, num_workers=4)
+auc_mtx # 18949 cells
+auc_mtx.to_csv("./data/AUC_noFil_CerebellumPons.csv")
+
+ex_matrix = pd.read_csv("./data/ATAC_genescore_Forebrain.txt", sep='\t', header=0, index_col=0)
+auc_mtx = aucell(ex_matrix, regulons, num_workers=4)
+auc_mtx # 23799 cells
+auc_mtx.to_csv("./data/AUC_noFil_Forebrain.csv")
+
+ex_matrix = pd.read_csv("./data/ATAC_genescore_Medulla.txt", sep='\t', header=0, index_col=0)
+auc_mtx = aucell(ex_matrix, regulons, num_workers=4)
+auc_mtx # 26225 cells
+auc_mtx.to_csv("./data/AUC_noFil_Medulla.csv")
+```
+
+
+## (2) TRS ~ AUC: neuro FB
+```{r}
+# neuronal lineage; SCENIC is forebrain-matched
+load("./data_rda/Script7/ArchR_lineage_neuro.rda")
+
+# TRS summary
+load("./data_rda/script7/TRS_correlation.rda")
+rm(TRS_summary_glial, correlation_summary_glial)
+
+# import regulon-motif links from SCENIC output, this will be used to filter high-quality regulons
+motifs <- read.csv("./data_output/script7_SCENIC/data/motifs_noFil.csv")
+names(motifs) <- motifs[1,]
+names(motifs)[1:2] <- motifs[2,1:2]
+motifs <- motifs[3:nrow(motifs),]
+motifs$AUC <- as.numeric(motifs$AUC)
+motifs$NES <- as.numeric(motifs$NES)
+motifs$RankAtMax <- as.numeric(motifs$RankAtMax)
+
+# regulon info
+regulons <- read.csv("./data_output/script7_SCENIC/data/regulons_noFil.csv")
+regulons$TF <- sub("\\(\\+\\)$", "", regulons$TF)
+
+# single-cell regulon activity ~ 20s
+scenic_AUC <- read.csv(paste0("./data_output/script7_SCENIC/data/AUC_noFil_Forebrain.csv"))
+names(scenic_AUC) <- sub("\\.\\.\\.$", "", names(scenic_AUC))
+```
+
+```{r}
+# get TRS, prepare for correlation ~ 10s
+AUC_summary <- list()
+correlation_summary_AUC <- list()
+for (x in c("Forebrain_Early","Forebrain_Late")){
+  print(x)
+  correlation_summary_AUC[[x]] <- data.frame()
+  
+  # get pseudotime bins
+  pseudotime <- data.frame(cell = getCellNames(ArchR_lineage_neuro[["Forebrain"]]),
+                           pseudotime = ArchR_lineage_neuro[["Forebrain"]]@cellColData@listData[[x]])
+  pseudotime <- na.omit(pseudotime)
+  pseudotime$bin <- pmin(floor(pseudotime$pseudotime) + 1, 100)
+  
+  # average regulon activity for each bin
+  AUC_avg <- data.frame()
+  for (i in 1:100){
+    scenic_AUC_fil <- scenic_AUC[scenic_AUC$Cell %in% pseudotime$cell[pseudotime$bin==i],]
+    AUC_avg <- rbind(AUC_avg, cbind(i, t(colMeans(scenic_AUC_fil[,2:ncol(scenic_AUC_fil)]))))
+  }
+  names(AUC_avg)[1] <- "pseudotime"
+  AUC_summary[[x]] <- AUC_avg
+    
+  # correlation: TRS ~ AUC
+  for (y in unique(TRS_summary_neuro[[x]]$condition)){
+    cor <- data.frame()
+    for (z in names(AUC_avg)[2:ncol(AUC_avg)]){
+      out <- cor.test(TRS_summary_neuro[[x]]$TRS[TRS_summary_neuro[[x]]$condition==y], AUC_avg[[z]], method = "spearman",exact = FALSE) 
+      cor <- rbind(cor, data.frame(condition = y, TF = z, p_value = out$p.value, coefficient = out$estimate))
+    }  
+    cor$FDR <- p.adjust(cor$p_value, method = "BH")
+    correlation_summary_AUC[[x]] <- rbind(correlation_summary_AUC[[x]], cor)
+  }
+}
+rm(x,i,y,z, pseudotime,AUC_avg,scenic_AUC_fil,cor)
+```
+
+```{r}
+save(AUC_summary, correlation_summary_AUC, file = "./data_rda/Script7/AUC_correlation.rda")
+```
+
+
+### supp table - correlated TFs
+```{r}
+cor <- correlation_summary_AUC
+cor[["Forebrain_Early"]]$stage <- "Early"
+cor[["Forebrain_Late"]]$stage <- "Late"
+cor <- rbind(cor[["Forebrain_Early"]], cor[["Forebrain_Late"]])
+cor$lineage <- "neuronal"
+cor$region <- "Forebrain"
+cor <- cor[cor$FDR <= 0.01 & cor$coefficient >= 0.6,]
+cor <- cor[,c("lineage","region","stage","condition","TF","p_value","FDR","coefficient")]
+writexl::write_xlsx(cor, path = "./data_output/Script7_TF/TF_correlation_TRSxAUC.xlsx")
+```
+
+
+
+## (3) plotting
+```{r}
+# import two correlations
+load("./data_rda/Script7/AUC_correlation.rda")
+load("./data_rda/Script7/TRS_correlation.rda")
+rm(TRS_summary_glial, correlation_summary_glial)
+
+# only look at diseases associated with forebrain (script 4)
+load("./data_rda/script4/sig_summary_ct.rda")
+sig_summary_ct <- sig_summary_ct[sig_summary_ct$text != "", ]
+SCAVENGE_sig_neuro <- sig_summary_ct[sub("_.*","",sig_summary_ct$ctRegion) %in% c("Neuron","Neuroblast","n-IPC"), 1:2]
+SCAVENGE_sig_neuro$rg <- sub(".*_","",SCAVENGE_sig_neuro$ctRegion)
+interest <- unique(SCAVENGE_sig_neuro$disease[SCAVENGE_sig_neuro$rg=="FB"])
+rm(sig_summary_ct, SCAVENGE_sig_neuro)
+```
+
+### main fig - overlap Venn
+```{r}
+# formatting results from TRS~chromVAR
+validation_summary <- list()
+validation_summary[["TRSxchromVAR"]] <- list()
+validation_summary[["TRSxAUC"]] <- list()
+validation_summary[["overlap"]] <- data.frame()
+cor_TRSxchromVAR <- list()
+cor_TRSxAUC <- list()
+for (x in c("Forebrain_Late","Forebrain_Early")){
+  
+  # TRS x chromVAR
+  cor1 <- correlation_summary_neuro[[x]]
+  cor1$TF <- sub(".*z:","",sub("_.*","",cor1$TF))
+  cor1 <- cor1[cor1$FDR <= 0.01 & cor1$coefficient >= 0.6,]
+  cor_TRSxchromVAR[[x]] <- cor1
+  
+  # TRS x AUC
+  cor2 <- correlation_summary_AUC[[x]]
+  cor2 <- cor2[cor2$FDR <= 0.01 & cor2$coefficient >= 0.6,]
+  cor_TRSxAUC[[x]] <- cor2
+  
+  for (y in interest){
+    validation_summary[["TRSxchromVAR"]][[x]][[y]] <- cor1$TF[cor1$condition==y]
+    validation_summary[["TRSxAUC"]][[x]][[y]] <- cor2$TF[cor2$condition==y]
+    n <- length(cor1$TF[cor1$condition==y][cor1$TF[cor1$condition==y] %in% cor2$TF[cor2$condition==y]])
+    validation_summary[["overlap"]] <- rbind(validation_summary[["overlap"]], c(x,y,n))
+  }
+}
+rm(x,y,cor1,cor2,n)
+save(validation_summary, file = "./data_rda/Script7/validation_summary.rda")
+```
+
+```{r}
+load("./data_rda/Script7/validation_summary.rda")
+
+p <- list()
+for (x in c("Forebrain_Early","Forebrain_Late")){
+  for (y in as.vector(interest)){
+    ls <- list(A = validation_summary[["TRSxchromVAR"]][[x]][[y]],
+               B = validation_summary[["TRSxAUC"]][[x]][[y]])
+    p[[paste0(x,"_",y)]] <- ggVennDiagram::ggVennDiagram(ls,  label = "count") +
+      scale_fill_gradient(low=colorspace::lighten("#039dfc", amount = 0.7), high="#039dfc", limits = c(0, 253)) +
+      ggtitle(paste0(sub("_", " ",x)," (",y,")")) + # sub("Forebrain","FB",x)
+      coord_flip() + theme(plot.title = element_text(hjust = 0.5, size=13), 
+                           legend.title = element_text(size = 12), legend.text = element_text(size = 11))
+  }
+}
+```
+
+```{r, fig.width=7.2, fig.height=3.2, dpi=300}
+wrap_plots(p) + plot_layout(guides = "collect") & theme(legend.position = "right", plot.margin = margin(2, 12, 2, 12))
+```
+
+
+### main fig - overlap TFs
+```{r}
+interest_overlap <- data.frame(lineage=c("Forebrain_Early","Forebrain_Late", "Forebrain_Late"), 
+                               condition=c("ASD","MDD","SCZ"))
+
+# plot correlation results for genes of interest
+set.seed(100)
+p <- list()
+for (x in 1:nrow(interest_overlap)){
+  lineage <- interest_overlap$lineage[[x]]
+  condition <- interest_overlap$condition[[x]]
+  
+  # overlapping genes
+  TF_list1 <- validation_summary[["TRSxchromVAR"]][[lineage]][[condition]]
+  TF_list2 <- validation_summary[["TRSxAUC"]][[lineage]][[condition]]
+  TF_overlap <- TF_list1[TF_list1 %in% TF_list2]
+  
+  # extract correlation results
+  df1 <- cor_TRSxchromVAR[[lineage]][cor_TRSxchromVAR[[lineage]]$condition==condition & cor_TRSxchromVAR[[lineage]]$TF %in% TF_overlap,]
+  df2 <- cor_TRSxAUC[[lineage]][cor_TRSxAUC[[lineage]]$condition==condition & cor_TRSxAUC[[lineage]]$TF %in% TF_overlap,]
+  names(df1)[3:5] <- paste0("TRSxchromVAR","_",names(df1)[3:5])
+  names(df2)[3:5] <- paste0("TRSxAUC","_",names(df2)[3:5])
+  df <- merge(df1[,c(1,2,4)], df2[,c(1,2,4)], by = c("condition","TF"))
+  
+  p[[x]] <- ggplot(df, aes(x=TRSxchromVAR_coefficient, y=TRSxAUC_coefficient)) +
+    geom_point(colour = "#039dfc") + BuenColors::pretty_plot() +
+    ggtitle(paste0(lineage, "_", condition)) + 
+    geom_text_repel(aes(label=TF), size=2.7, min.segment.length = 0, colour = "black") +
+    scale_x_continuous(breaks = c(0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95)) +
+    scale_y_continuous(breaks = c(0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95)) +
+    theme(plot.title = element_text(size=10), axis.text = element_text(size=9))
+}
+rm(x, lineage, condition, TF_list1, TF_list2, TF_overlap, df1, df2, df)
+```
+
+```{r, fig.width=5.9, fig.height=2.6, dpi=300, message=FALSE}
+# plot: selected two
+p[[2]] <- p[[2]] + theme(axis.title.y = element_blank())
+wrap_plots(p[1:2]) + plot_layout(ncol = 2, widths = c(1, 1.5))
+```
+
+```{r, dev='svg', fig.width=5.9, fig.height=2.6, dpi=300, message=FALSE
+#svg("figure.svg", width = 5.9, height = 2.6)
+wrap_plots(p[1:2]) + plot_layout(ncol = 2, widths = c(1, 1.5))
+#dev.off()
+```
+
+```{r}
+# list of genes
+validation_summary[["TRSxchromVAR"]][["Forebrain_Early"]][["ASD"]] [ validation_summary[["TRSxchromVAR"]][["Forebrain_Early"]][["ASD"]] %in% validation_summary[["TRSxAUC"]][["Forebrain_Early"]][["ASD"]] ]
+validation_summary[["TRSxchromVAR"]][["Forebrain_Late"]][["MDD"]] [ validation_summary[["TRSxchromVAR"]][["Forebrain_Late"]][["MDD"]] %in% validation_summary[["TRSxAUC"]][["Forebrain_Late"]][["MDD"]] ]
+validation_summary[["TRSxchromVAR"]][["Forebrain_Late"]][["SCZ"]] [ validation_summary[["TRSxchromVAR"]][["Forebrain_Late"]][["SCZ"]] %in% validation_summary[["TRSxAUC"]][["Forebrain_Late"]][["SCZ"]] ]
 ```
 
 
